@@ -6,31 +6,21 @@ import threading
 import time
 import queue
 import os
-from PIL import Image, ImageTk
 import torch
+from PIL import Image, ImageTk
 
 class YOLOApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLOv8 Pose Tracker (Nano)")
+        self.root.title("YOLOv8 Pose Tracker")
         self.root.geometry("800x600")
 
-        # Проверка доступности CUDA
-        if torch.cuda.is_available():
-            print("CUDA доступна. Используется GPU")
-            self.device = 'cuda'
-        else:
-            print("CUDA недоступна. Используется CPU (производительность может быть низкой)")
-            self.device = 'cpu'
+        # Проверка CUDA
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"Using device: {self.device}")
 
-        # Загрузка модели Nano (менее требовательная к ресурсам)
-        try:
-            self.model = YOLO('yolov8n-pose.pt')
-            print("Модель YOLOv8n-pose загружена")
-        except Exception as e:
-            print(f"❌ Ошибка загрузки модели: {e}")
-            print("Попробуйте скачать модель вручную с https://github.com/ultralytics/ultralytics/releases")
-            exit(1)
+        # Инициализация модели
+        self.model = YOLO('yolov8n-pose.pt').to(self.device)
 
         # Переменные состояния
         self.is_recording = False
@@ -38,11 +28,15 @@ class YOLOApp:
         self.video_writer = None
         self.cap = None
         self.frame_queue = queue.Queue(maxsize=10)
+        self.recording_number = 1  # Номер текущего видео
 
         # Создание интерфейса
         self.create_widgets()
 
-        # Запуск фонового потока для обновления таймера
+        # Автоматическое открытие камеры
+        self.start_camera()
+
+        # Запуск обновления интерфейса
         self.update_timer()
 
     def create_widgets(self):
@@ -50,7 +44,7 @@ class YOLOApp:
         button_frame = ttk.Frame(self.root)
         button_frame.pack(pady=10)
 
-        # Кнопка запуска/остановки
+        # Кнопка записи
         self.record_btn = ttk.Button(button_frame, text="▶ Начать запись",
                                     command=self.toggle_recording)
         self.record_btn.pack(side=tk.LEFT, padx=5)
@@ -60,32 +54,69 @@ class YOLOApp:
                                     font=('Arial', 12))
         self.timer_label.pack(side=tk.LEFT, padx=10)
 
-        # Метка для отображения видео
+        # Метка для видео
         self.video_label = ttk.Label(self.root)
         self.video_label.pack(fill=tk.BOTH, expand=True)
 
+    def start_camera(self):
+        """Инициализация камеры и запуск потока"""
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            self.show_error("Не удалось открыть камеру!")
+            return
+
+        # Установка разрешения
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        # Запуск потока обработки кадров
+        self.process_thread = threading.Thread(target=self.process_video, daemon=True)
+        self.process_thread.start()
+
+    def process_video(self):
+        """Цикл обработки кадров"""
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            # Обработка кадра
+            results = self.model(frame, device=self.device)
+            annotated_frame = results[0].plot()
+
+            # Запись в файл, если активна
+            if self.is_recording:
+                try:
+                    self.video_writer.write(cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR))
+                except Exception as e:
+                    print(f"Ошибка записи: {e}")
+
+            # Отправка кадра в очередь для отображения
+            try:
+                self.frame_queue.put_nowait(annotated_frame)
+            except queue.Full:
+                pass
+
     def toggle_recording(self):
-        """Переключение состояния записи"""
+        """Переключение записи"""
         if not self.is_recording:
             self.start_recording()
         else:
             self.stop_recording()
 
     def start_recording(self):
-        """Запуск записи видео"""
+        """Начало записи видео"""
         self.is_recording = True
         self.start_time = time.time()
         self.record_btn.config(text="■ Остановить запись")
 
-        # Инициализация камеры с оптимизированными параметрами
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            self.show_error("Не удалось открыть камеру!")
-            return
+        # Создаем папку для сохранения, если её нет
+        save_dir = os.path.join(os.path.expanduser("~"), "Desktop", "Recordings")
+        os.makedirs(save_dir, exist_ok=True)
 
-        # Установка меньшего разрешения для RTX 1650 (640x480)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # Генерируем имя файла
+        filename = f"output_{self.recording_number}.mp4"
+        filepath = os.path.join(save_dir, filename)
 
         # Получаем размеры кадра
         ret, frame = self.cap.read()
@@ -93,51 +124,24 @@ class YOLOApp:
             self.show_error("Не удалось получить кадр с камеры!")
             return
 
-        # Создаем VideoWriter с уменьшенным FPS (15) для экономии ресурсов
+        # Создаем VideoWriter
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         self.video_writer = cv2.VideoWriter(
-            'output_pose.mp4', fourcc, 15.0,
+            filepath, fourcc, 15.0,
             (frame.shape[1], frame.shape[0])
         )
 
-        # Запуск потока для обработки видео
-        self.process_thread = threading.Thread(
-            target=self.process_video,
-            daemon=True
-        )
-        self.process_thread.start()
+        self.recording_number += 1  # Увеличиваем номер для следующей записи
 
     def stop_recording(self):
-        """Остановка записи видео"""
+        """Остановка записи"""
         self.is_recording = False
         self.record_btn.config(text="▶ Начать запись")
 
-        # Освобождение ресурсов
-        if hasattr(self, 'cap'):
-            self.cap.release()
         if hasattr(self, 'video_writer'):
             self.video_writer.release()
-        print("Запись завершена. Файл сохранен как output_pose.mp4")
-
-    def process_video(self):
-        """Основной цикл обработки видео в отдельном потоке"""
-        while self.is_recording:
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-
-            # Обработка кадра с использованием GPU (если доступен)
-            results = self.model(frame, device=self.device)
-            annotated_frame = results[0].plot()
-
-            # Запись в файл (преобразуем RGB в BGR для OpenCV)
-            self.video_writer.write(cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR))
-
-            # Передача кадра в очередь для отображения (RGB)
-            try:
-                self.frame_queue.put_nowait(annotated_frame)
-            except queue.Full:
-                pass
+            print(f"Запись завершена. Файл сохранен в: {self.video_writer.filename}")
+            self.video_writer = None
 
     def update_timer(self):
         """Обновление таймера и отображения кадров"""
@@ -147,28 +151,22 @@ class YOLOApp:
             mins, secs = divmod(rem, 60)
             self.timer_label.config(text=f"{hours:02}:{mins:02}:{secs:02}")
 
-        # Попытка получить новый кадр из очереди
+        # Обновление кадра
         try:
             frame = self.frame_queue.get_nowait()
             self.display_frame(frame)
         except queue.Empty:
             pass
 
-        # Повторный вызов через 33 мс (~30 FPS)
         self.root.after(33, self.update_timer)
 
     def display_frame(self, frame):
-        """Отображение кадра в Label с использованием PIL"""
-        # Масштабируем кадр
+        """Отображение кадра в интерфейсе"""
         img_resized = self.resize_frame(frame)
-
-        # Конвертируем RGB (OpenCV) в RGB (PIL)
         pil_image = Image.fromarray(img_resized)
         photo = ImageTk.PhotoImage(image=pil_image)
-
-        # Обновляем метку
         self.video_label.config(image=photo)
-        self.video_label.image = photo  # Сохраняем ссылку, чтобы избежать сборки мусора
+        self.video_label.image = photo
 
     def resize_frame(self, frame):
         """Масштабирование кадра под размер окна"""
@@ -176,7 +174,7 @@ class YOLOApp:
         height = self.video_label.winfo_height()
 
         if width <= 0 or height <= 0:
-            return frame  # Не масштабируем, если размеры не известны
+            return frame
 
         aspect_ratio = frame.shape[1] / frame.shape[0]
         new_width = min(width, int(height * aspect_ratio))
@@ -185,7 +183,7 @@ class YOLOApp:
         return cv2.resize(frame, (new_width, new_height))
 
     def show_error(self, message):
-        """Показ сообщения об ошибке"""
+        """Вывод ошибок"""
         error_window = tk.Toplevel(self.root)
         error_window.title("Ошибка")
         ttk.Label(error_window, text=message, padding=20).pack()
