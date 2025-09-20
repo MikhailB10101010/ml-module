@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 from ultralytics import YOLO
 import cv2
 import threading
@@ -7,19 +7,23 @@ import time
 import queue
 import os
 import csv
-from PIL import Image, ImageTk
+import numpy as np
 import json
 import subprocess
 import sys
 from datetime import datetime
 import uuid
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+import math
 
 
 class YOLOApp:
     def __init__(self, root, config=None):
         self.root = root
-        self.root.title("YOLOv8 Pose Tracker - CSV Export")
+        self.root.title("YOLOv8 Pose Tracker - Приседания")
         self.root.geometry("900x700")
+        self.root.configure(bg="#f0f0f0")
 
         # Загрузка конфигурации
         self.config = config or self.load_config()
@@ -48,9 +52,17 @@ class YOLOApp:
         self.frame_queue = queue.Queue(maxsize=10)
         self.csv_file = None
         self.csv_writer = None
+        self.squat_model = None
+        self.features_mean = None
+        self.features_std = None
+        self.sequence_length = 30
+        self.feature_sequence = []
 
         # Путь к CSV-файлу
         self.csv_path = 'keypoints.csv'
+
+        # Проверка наличия модели для анализа приседаний
+        self.check_squat_model()
 
         # Создание интерфейса
         self.create_widgets()
@@ -83,7 +95,43 @@ class YOLOApp:
         except:
             return False
 
+    def check_squat_model(self):
+        """Проверка наличия модели анализа приседаний"""
+        try:
+            model_path = os.path.join(os.path.dirname(__file__), 'squat_model.h5')
+            mean_path = os.path.join(os.path.dirname(__file__), 'features_mean.npy')
+            std_path = os.path.join(os.path.dirname(__file__), 'features_std.npy')
+
+            if os.path.exists(model_path) and os.path.exists(mean_path) and os.path.exists(std_path):
+                self.squat_model = load_model(model_path)
+                self.features_mean = np.load(mean_path)
+                self.features_std = np.load(std_path)
+                self.squat_status = "Готово"
+                self.squat_color = "green"
+            else:
+                self.squat_status = "Модель не загружена"
+                self.squat_color = "red"
+                print("⚠️ Модель анализа приседаний не найдена. Для работы необходима предобученная модель.")
+        except Exception as e:
+            self.squat_status = f"Ошибка: {str(e)}"
+            self.squat_color = "red"
+            print(f"❌ Ошибка загрузки модели: {e}")
+
     def create_widgets(self):
+        # Заголовок
+        title_frame = ttk.Frame(self.root)
+        title_frame.pack(pady=10)
+        title_label = ttk.Label(title_frame, text="Анализ приседаний", font=('Arial', 16, 'bold'))
+        title_label.pack()
+
+        # Информация о модели
+        model_info = ttk.Frame(self.root)
+        model_info.pack(pady=5)
+        ttk.Label(model_info, text=f"Модель YOLO: {self.config['model_size']} | ", font=('Arial', 10)).pack(
+            side=tk.LEFT)
+        ttk.Label(model_info, text=f"Статус анализа приседаний: {self.squat_status}",
+                  foreground=self.squat_color, font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+
         # Контейнер для кнопок
         button_frame = ttk.Frame(self.root)
         button_frame.pack(pady=10)
@@ -98,13 +146,18 @@ class YOLOApp:
                                             command=self.process_existing_video, width=20)
         self.process_video_btn.pack(side=tk.LEFT, padx=5)
 
+        # Кнопка обучения модели
+        self.train_btn = ttk.Button(button_frame, text="📚 Обучить модель",
+                                    command=self.train_model, width=20)
+        self.train_btn.pack(side=tk.LEFT, padx=5)
+
         # Таймер
         self.timer_label = ttk.Label(button_frame, text="00:00:00",
                                      font=('Arial', 14, 'bold'), foreground="blue")
         self.timer_label.pack(side=tk.LEFT, padx=10)
 
         # Метка для отображения видео
-        self.video_label = ttk.Label(self.root, background="black")
+        self.video_label = ttk.Label(self.root, background="black", relief="solid", borderwidth=1)
         self.video_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Индикатор записи
@@ -112,9 +165,19 @@ class YOLOApp:
         self.status_label.pack(side=tk.BOTTOM, pady=5)
 
         # Информация о конфигурации
-        config_text = f"Модель: {self.config['model_size']} | Разрешение: {self.config['resolution'][0]}x{self.config['resolution'][1]} | FPS: {self.config['fps']}"
+        config_text = f"Разрешение: {self.config['resolution'][0]}x{self.config['resolution'][1]} | FPS: {self.config['fps']}"
         config_label = ttk.Label(self.root, text=config_text, font=('Arial', 9), foreground="gray")
         config_label.pack(side=tk.BOTTOM, pady=2)
+
+        # Информация о работе
+        info_frame = ttk.Frame(self.root)
+        info_frame.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(info_frame, text="Инструкция:", font=('Arial', 10, 'bold')).pack(anchor=tk.W)
+        info_text = "1. Нажмите 'Обучить модель', чтобы подготовить модель анализа приседаний\n" \
+                    "2. Используйте 'Начать запись' для записи видео с камерой\n" \
+                    "3. Используйте 'Обработать видео' для анализа готового видеофайла\n" \
+                    "4. Для сбора данных используйте скрипт collect_data.py"
+        ttk.Label(info_frame, text=info_text, justify=tk.LEFT, wraplength=850).pack(anchor=tk.W)
 
     def toggle_recording(self):
         """Переключение состояния записи"""
@@ -133,6 +196,7 @@ class YOLOApp:
         self.start_time = time.time()
         self.record_btn.config(text="■ Остановить запись")
         self.process_video_btn.config(state='disabled')
+        self.train_btn.config(state='disabled')
         self.status_label.config(text="Запись ведётся...", foreground="red")
 
         # Инициализация камеры
@@ -181,6 +245,7 @@ class YOLOApp:
         self.is_recording = False
         self.record_btn.config(text="▶ Начать запись")
         self.process_video_btn.config(state='normal')
+        self.train_btn.config(state='normal')
         self.status_label.config(text="Запись остановлена", foreground="gray")
 
         # Освобождение ресурсов
@@ -217,6 +282,7 @@ class YOLOApp:
         self.is_processing_video = True
         self.process_video_btn.config(text="⏹ Остановить обработку")
         self.record_btn.config(state='disabled')
+        self.train_btn.config(state='disabled')
         self.status_label.config(text="Обработка видео...", foreground="orange")
 
         # Запуск потока для обработки видео
@@ -232,6 +298,7 @@ class YOLOApp:
         self.is_processing_video = False
         self.process_video_btn.config(text="🎬 Обработать видео")
         self.record_btn.config(state='normal')
+        self.train_btn.config(state='normal')
         self.status_label.config(text="Обработка остановлена", foreground="gray")
 
         # Освобождение ресурсов
@@ -267,6 +334,40 @@ class YOLOApp:
                 for x, y in keypoints[0]:  # Первая персона, 17 точек
                     row.extend([f"{x:.3f}", f"{y:.3f}"])
                 self.csv_writer.writerow(row)
+
+            # Обработка признаков для приседаний
+            if len(keypoints) > 0 and self.squat_model is not None:
+                kp = keypoints[0]  # Первая персона
+                features = self.calculate_squat_features(kp)
+
+                if features is not None:
+                    self.feature_sequence.append(features)
+
+                    # Если набрали достаточную последовательность
+                    if len(self.feature_sequence) >= self.sequence_length:
+                        # Нормализуем данные
+                        features_array = np.array(self.feature_sequence[-self.sequence_length:])
+                        features_normalized = (features_array - self.features_mean) / self.features_std
+
+                        # Добавляем размерность для batch
+                        features_normalized = np.expand_dims(features_normalized, axis=0)
+
+                        # Предсказание
+                        prediction = self.squat_model.predict(features_normalized)
+                        is_correct = prediction[0][0] > 0.5
+
+                        # Добавляем текст на кадр
+                        text = "✅ Правильно" if is_correct else "❌ Неправильно"
+                        color = (0, 255, 0) if is_correct else (0, 0, 255)
+                        annotated_frame = cv2.putText(
+                            annotated_frame,
+                            text,
+                            (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            1,
+                            color,
+                            2
+                        )
 
             # Передача кадра в очередь для отображения
             try:
@@ -350,6 +451,40 @@ class YOLOApp:
                         row.extend([f"{x:.3f}", f"{y:.3f}"])
                     self.csv_writer.writerow(row)
 
+                # Обработка признаков для приседаний
+                if len(keypoints) > 0 and self.squat_model is not None:
+                    kp = keypoints[0]  # Первая персона
+                    features = self.calculate_squat_features(kp)
+
+                    if features is not None:
+                        self.feature_sequence.append(features)
+
+                        # Если набрали достаточную последовательность
+                        if len(self.feature_sequence) >= self.sequence_length:
+                            # Нормализуем данные
+                            features_array = np.array(self.feature_sequence[-self.sequence_length:])
+                            features_normalized = (features_array - self.features_mean) / self.features_std
+
+                            # Добавляем размерность для batch
+                            features_normalized = np.expand_dims(features_normalized, axis=0)
+
+                            # Предсказание
+                            prediction = self.squat_model.predict(features_normalized)
+                            is_correct = prediction[0][0] > 0.5
+
+                            # Добавляем текст на кадр
+                            text = "✅ Правильно" if is_correct else "❌ Неправильно"
+                            color = (0, 255, 0) if is_correct else (0, 0, 255)
+                            annotated_frame = cv2.putText(
+                                annotated_frame,
+                                text,
+                                (50, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                1,
+                                color,
+                                2
+                            )
+
                 # Передача кадра в очередь для отображения
                 try:
                     self.frame_queue.put_nowait(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB))
@@ -376,6 +511,67 @@ class YOLOApp:
         except Exception as e:
             self.show_error(f"Ошибка при обработке видео: {str(e)}")
             self.stop_video_processing()
+
+    def calculate_squat_features(self, keypoints):
+        """Вычисление признаков для анализа приседаний"""
+        # keypoints: numpy array shape [17, 2] (координаты точек)
+        features = []
+
+        # Проверка наличия всех необходимых точек
+        if len(keypoints) < 17:
+            return None
+
+        # Функция для вычисления угла между тремя точками
+        def calculate_angle(a, b, c):
+            a = np.array(a)
+            b = np.array(b)
+            c = np.array(c)
+            ba = a - b
+            bc = c - b
+            cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+            angle = np.arccos(cosine_angle)
+            return np.degrees(angle)
+
+        # Таз: среднее между правым и левым бедром (точки 11 и 12)
+        hip_center = (keypoints[11] + keypoints[12]) / 2
+
+        # 1. Угол правого колена (между бедром, колено, лодыжка)
+        right_knee = calculate_angle(keypoints[11], keypoints[13], keypoints[15])
+
+        # 2. Угол левого колена
+        left_knee = calculate_angle(keypoints[12], keypoints[14], keypoints[16])
+
+        # 3. Угол правого бедра (между тазом, бедро, колено)
+        right_hip = calculate_angle(hip_center, keypoints[11], keypoints[13])
+
+        # 4. Угол левого бедра
+        left_hip = calculate_angle(hip_center, keypoints[12], keypoints[14])
+
+        # 5. Расстояние между коленями
+        dist_knees = np.linalg.norm(keypoints[13] - keypoints[14])
+
+        # 6. Расстояние между ступнями
+        dist_feet = np.linalg.norm(keypoints[15] - keypoints[16])
+
+        # 7. Глубина приседа (разница Y между тазом и средней лодыжкой)
+        ankle_y = (keypoints[15][1] + keypoints[16][1]) / 2
+        depth = hip_center[1] - ankle_y
+
+        # 8. Отклонение коленей от вертикали (для правой ноги)
+        knee_deviation = abs(keypoints[13][0] - keypoints[11][0])
+
+        # Нормализуем глубину относительно роста (примерное значение)
+        if keypoints[11][1] > 0 and keypoints[12][1] > 0:
+            height_estimate = max(keypoints[11][1], keypoints[12][1]) - min(keypoints[15][1], keypoints[16][1])
+            if height_estimate > 0:
+                depth = depth / height_estimate
+
+        features = [
+            right_knee, left_knee, right_hip, left_hip,
+            dist_knees, dist_feet, depth, knee_deviation
+        ]
+
+        return features
 
     def generate_unique_filenames(self, prefix=""):
         """Генерация уникальных имен файлов"""
@@ -458,6 +654,26 @@ class YOLOApp:
         ttk.Label(error_window, text=message, padding=20).pack()
         ttk.Button(error_window, text="OK", command=error_window.destroy).pack(pady=10)
 
+    def train_model(self):
+        """Запуск обучения модели"""
+        if self.is_recording or self.is_processing_video:
+            self.show_error("Сначала остановите запись или обработку видео!")
+            return
+
+        # Запускаем скрипт обучения в отдельном процессе
+        try:
+            subprocess.Popen([sys.executable, 'train_squat_model.py'])
+            self.show_info("Запущено обучение модели. Пожалуйста, подождите...")
+        except Exception as e:
+            self.show_error(f"Ошибка при запуске обучения: {str(e)}")
+
+    def show_info(self, message):
+        """Показ информационного сообщения"""
+        info_window = tk.Toplevel(self.root)
+        info_window.title("Информация")
+        ttk.Label(info_window, text=message, padding=20).pack()
+        ttk.Button(info_window, text="OK", command=info_window.destroy).pack(pady=10)
+
 
 def check_models():
     """Проверка наличия моделей"""
@@ -480,20 +696,21 @@ def check_models():
 def run_configuration():
     """Запуск скрипта конфигурации"""
     try:
-        # Проверяем, существует ли test.py
-        if os.path.exists('test.py'):
-            result = subprocess.run([sys.executable, 'test.py'],
-                                    capture_output=True, text=True)
-            if result.returncode == 0:
-                return True
-            else:
-                print("Ошибка при запуске test.py:", result.stderr)
-                return False
-        else:
-            print("Файл test.py не найден")
-            return False
+        # Проверяем, существует ли config.json
+        if not os.path.exists('config.json'):
+            # Создаем конфиг по умолчанию
+            default_config = {
+                'model_size': 'nano',
+                'resolution': [640, 480],
+                'fps': 20,
+                'use_gpu': True
+            }
+            with open('config.json', 'w') as f:
+                json.dump(default_config, f, indent=4)
+            print("Создан файл конфигурации config.json")
+        return True
     except Exception as e:
-        print(f"Ошибка при запуске конфигурации: {e}")
+        print(f"Ошибка при конфигурации: {e}")
         return False
 
 
@@ -503,7 +720,7 @@ if __name__ == "__main__":
         exit(1)
 
     # Запуск конфигурации
-    print("Запуск тестирования конфигурации...")
+    print("Запуск конфигурации...")
     if not run_configuration():
         print("Продолжаем с настройками по умолчанию...")
 
