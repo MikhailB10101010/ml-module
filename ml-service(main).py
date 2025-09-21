@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 from datetime import datetime
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 import uuid
 import tensorflow as tf
 from tensorflow.keras.models import load_model
@@ -57,6 +58,8 @@ class YOLOApp:
         self.features_std = None
         self.sequence_length = 30
         self.feature_sequence = []
+        self.previous_knee_angle = None
+        self.is_squatting = False
 
         # Путь к CSV-файлу
         self.csv_path = 'keypoints.csv'
@@ -159,6 +162,7 @@ class YOLOApp:
         # Метка для отображения видео
         self.video_label = ttk.Label(self.root, background="black", relief="solid", borderwidth=1)
         self.video_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.root.update_idletasks()
 
         # Индикатор записи
         self.status_label = ttk.Label(self.root, text="Готово", font=('Arial', 10), foreground="gray")
@@ -198,6 +202,8 @@ class YOLOApp:
         self.process_video_btn.config(state='disabled')
         self.train_btn.config(state='disabled')
         self.status_label.config(text="Запись ведётся...", foreground="red")
+        self.previous_knee_angle = None
+        self.is_squatting = False
 
         # Инициализация камеры
         self.cap = cv2.VideoCapture(0)
@@ -284,6 +290,8 @@ class YOLOApp:
         self.record_btn.config(state='disabled')
         self.train_btn.config(state='disabled')
         self.status_label.config(text="Обработка видео...", foreground="orange")
+        self.previous_knee_angle = None
+        self.is_squatting = False
 
         # Запуск потока для обработки видео
         self.process_thread = threading.Thread(
@@ -308,6 +316,128 @@ class YOLOApp:
             self.video_writer.release()
         if hasattr(self, 'csv_file') and self.csv_file:
             self.csv_file.close()
+
+    def add_text_pil(self, frame, text, position=(50, 50), color=(0, 255, 0)):
+        """Добавляет текст на кадр с помощью PIL"""
+        img_pil = Image.fromarray(frame)
+        draw = ImageDraw.Draw(img_pil)
+
+        # Используем стандартный шрифт
+        try:
+            font = ImageFont.truetype("arial.ttf", 32)
+        except:
+            font = None
+
+        if font is None:
+            draw.text(position, text, fill=color)
+        else:
+            draw.text(position, text, fill=color, font=font)
+
+        return np.array(img_pil)
+
+    def calculate_squat_features(self, keypoints):
+        """Вычисление признаков для анализа приседаний"""
+        # keypoints: numpy array shape [17, 2] (координаты точек)
+        features = []
+        errors = []  # 0=нет, 1=предупреждение, 2=ошибка
+
+        # Проверка наличия всех необходимых точек
+        if len(keypoints) < 17:
+            return None, None
+
+        # Функция для вычисления угла между тремя точками
+        def calculate_angle(a, b, c):
+            a = np.array(a)
+            b = np.array(b)
+            c = np.array(c)
+            ba = a - b
+            bc = c - b
+            cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+            angle = np.arccos(cosine_angle)
+            return np.degrees(angle)
+
+        # Таз: среднее между правым и левым бедром (точки 11 и 12)
+        hip_center = (keypoints[11] + keypoints[12]) / 2
+
+        # 1. Угол правого колена
+        right_knee = calculate_angle(keypoints[11], keypoints[13], keypoints[15])
+        error_right_knee = 0
+        if right_knee < 80:
+            error_right_knee = 2
+        elif right_knee < 90:
+            error_right_knee = 1
+
+        # 2. Угол левого колена
+        left_knee = calculate_angle(keypoints[12], keypoints[14], keypoints[16])
+        error_left_knee = 0
+        if left_knee < 80:
+            error_left_knee = 2
+        elif left_knee < 90:
+            error_left_knee = 1
+
+        # 3. Угол правого бедра
+        right_hip = calculate_angle(hip_center, keypoints[11], keypoints[13])
+        error_right_hip = 0
+        if right_hip > 130:
+            error_right_hip = 2
+        elif right_hip > 120:
+            error_right_hip = 1
+
+        # 4. Угол левого бедра
+        left_hip = calculate_angle(hip_center, keypoints[12], keypoints[14])
+        error_left_hip = 0
+        if left_hip > 130:
+            error_left_hip = 2
+        elif left_hip > 120:
+            error_left_hip = 1
+
+        # 5. Расстояние между коленями
+        dist_knees = np.linalg.norm(keypoints[13] - keypoints[14])
+        error_knees = 0
+        if dist_knees < 0.05:
+            error_knees = 2
+        elif dist_knees < 0.1:
+            error_knees = 1
+
+        # 6. Расстояние между ступнями
+        dist_feet = np.linalg.norm(keypoints[15] - keypoints[16])
+        error_feet = 0
+        if dist_feet < 0.15:
+            error_feet = 2
+        elif dist_feet < 0.2:
+            error_feet = 1
+
+        # 7. Глубина приседа
+        ankle_y = (keypoints[15][1] + keypoints[16][1]) / 2
+        depth = hip_center[1] - ankle_y
+
+        # 8. Отклонение коленей от вертикали
+        knee_deviation = abs(keypoints[13][0] - keypoints[11][0])
+        error_knee_deviation = 0
+        if knee_deviation > 0.15:
+            error_knee_deviation = 2
+        elif knee_deviation > 0.1:
+            error_knee_deviation = 1
+
+        # Нормализуем глубину относительно роста
+        if keypoints[11][1] > 0 and keypoints[12][1] > 0:
+            height_estimate = max(keypoints[11][1], keypoints[12][1]) - min(keypoints[15][1], keypoints[16][1])
+            if height_estimate > 0:
+                depth = depth / height_estimate
+
+        features = [
+            right_knee, left_knee, right_hip, left_hip,
+            dist_knees, dist_feet, depth, knee_deviation
+        ]
+
+        errors = [
+            error_right_knee, error_left_knee,
+            error_right_hip, error_left_hip,
+            error_knees, error_feet,
+            0, error_knee_deviation  # Последний элемент — отклонение колена
+        ]
+
+        return features, errors
 
     def process_camera_video(self):
         """Основной цикл обработки видео с камеры"""
@@ -338,7 +468,7 @@ class YOLOApp:
             # Обработка признаков для приседаний
             if len(keypoints) > 0 and self.squat_model is not None:
                 kp = keypoints[0]  # Первая персона
-                features = self.calculate_squat_features(kp)
+                features, errors = self.calculate_squat_features(kp)
 
                 if features is not None:
                     self.feature_sequence.append(features)
@@ -356,18 +486,52 @@ class YOLOApp:
                         prediction = self.squat_model.predict(features_normalized)
                         is_correct = prediction[0][0] > 0.5
 
-                        # Добавляем текст на кадр
-                        text = "✅ Правильно" if is_correct else "❌ Неправильно"
-                        color = (0, 255, 0) if is_correct else (0, 0, 255)
-                        annotated_frame = cv2.putText(
-                            annotated_frame,
-                            text,
-                            (50, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1,
-                            color,
-                            2
-                        )
+                        # Получаем текущий угол колена (первый элемент features)
+                        current_knee_angle = features[0]
+
+                        # Проверяем, начинается ли движение (сгибание)
+                        if self.previous_knee_angle is None:
+                            self.previous_knee_angle = current_knee_angle
+                            self.is_squatting = False
+                        else:
+                            # Если угол уменьшается — начинается приседание
+                            if current_knee_angle < self.previous_knee_angle - 5:
+                                self.is_squatting = True
+                            elif current_knee_angle > self.previous_knee_angle + 5 and self.is_squatting:
+                                self.is_squatting = False
+
+                        # Показываем текст только во время движения
+                        if self.is_squatting:
+                            text = "GOOD" if is_correct else "BAD"
+                            color = (0, 255, 0) if is_correct else (0, 0, 255)
+                            annotated_frame = self.add_text_pil(annotated_frame, text, (50, 50), color)
+
+                        # Выделяем проблемные точки при ошибке
+                        if not is_correct and self.is_squatting and len(errors) >= 8:
+                            red_points = []
+                            yellow_points = []
+
+                            # Список точек по индексам ошибок
+                            point_map = [13, 14, 11, 12, 13, 14, 13, 13]  # Соответствие индексов ошибок
+
+                            for i in range(min(len(errors), len(point_map))):
+                                if errors[i] == 2:
+                                    red_points.append(point_map[i])
+                                elif errors[i] == 1:
+                                    yellow_points.append(point_map[i])
+
+                            # Выделяем точки
+                            for point_idx in red_points:
+                                if point_idx < len(kp):
+                                    x, y = int(kp[point_idx][0]), int(kp[point_idx][1])
+                                    cv2.circle(annotated_frame, (x, y), 10, (0, 0, 255), -1)  # Красный
+
+                            for point_idx in yellow_points:
+                                if point_idx < len(kp):
+                                    x, y = int(kp[point_idx][0]), int(kp[point_idx][1])
+                                    cv2.circle(annotated_frame, (x, y), 10, (0, 255, 255), -1)  # Жёлтый
+
+                        self.previous_knee_angle = current_knee_angle
 
             # Передача кадра в очередь для отображения
             try:
@@ -454,7 +618,7 @@ class YOLOApp:
                 # Обработка признаков для приседаний
                 if len(keypoints) > 0 and self.squat_model is not None:
                     kp = keypoints[0]  # Первая персона
-                    features = self.calculate_squat_features(kp)
+                    features, errors = self.calculate_squat_features(kp)
 
                     if features is not None:
                         self.feature_sequence.append(features)
@@ -472,18 +636,52 @@ class YOLOApp:
                             prediction = self.squat_model.predict(features_normalized)
                             is_correct = prediction[0][0] > 0.5
 
-                            # Добавляем текст на кадр
-                            text = "✅ Правильно" if is_correct else "❌ Неправильно"
-                            color = (0, 255, 0) if is_correct else (0, 0, 255)
-                            annotated_frame = cv2.putText(
-                                annotated_frame,
-                                text,
-                                (50, 50),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                1,
-                                color,
-                                2
-                            )
+                            # Получаем текущий угол колена (первый элемент features)
+                            current_knee_angle = features[0]
+
+                            # Проверяем, начинается ли движение (сгибание)
+                            if self.previous_knee_angle is None:
+                                self.previous_knee_angle = current_knee_angle
+                                self.is_squatting = False
+                            else:
+                                # Если угол уменьшается — начинается приседание
+                                if current_knee_angle < self.previous_knee_angle - 5:
+                                    self.is_squatting = True
+                                elif current_knee_angle > self.previous_knee_angle + 5 and self.is_squatting:
+                                    self.is_squatting = False
+
+                            # Показываем текст только во время движения
+                            if self.is_squatting:
+                                text = "GOOD" if is_correct else "BAD"
+                                color = (0, 255, 0) if is_correct else (0, 0, 255)
+                                annotated_frame = self.add_text_pil(annotated_frame, text, (50, 50), color)
+
+                            # Выделяем проблемные точки при ошибке
+                            if not is_correct and self.is_squatting and len(errors) >= 8:
+                                red_points = []
+                                yellow_points = []
+
+                                # Список точек по индексам ошибок
+                                point_map = [13, 14, 11, 12, 13, 14, 13, 13]  # Соответствие индексов ошибок
+
+                                for i in range(min(len(errors), len(point_map))):
+                                    if errors[i] == 2:
+                                        red_points.append(point_map[i])
+                                    elif errors[i] == 1:
+                                        yellow_points.append(point_map[i])
+
+                                # Выделяем точки
+                                for point_idx in red_points:
+                                    if point_idx < len(kp):
+                                        x, y = int(kp[point_idx][0]), int(kp[point_idx][1])
+                                        cv2.circle(annotated_frame, (x, y), 10, (0, 0, 255), -1)  # Красный
+
+                                for point_idx in yellow_points:
+                                    if point_idx < len(kp):
+                                        x, y = int(kp[point_idx][0]), int(kp[point_idx][1])
+                                        cv2.circle(annotated_frame, (x, y), 10, (0, 255, 255), -1)  # Жёлтый
+
+                            self.previous_knee_angle = current_knee_angle
 
                 # Передача кадра в очередь для отображения
                 try:
@@ -511,67 +709,6 @@ class YOLOApp:
         except Exception as e:
             self.show_error(f"Ошибка при обработке видео: {str(e)}")
             self.stop_video_processing()
-
-    def calculate_squat_features(self, keypoints):
-        """Вычисление признаков для анализа приседаний"""
-        # keypoints: numpy array shape [17, 2] (координаты точек)
-        features = []
-
-        # Проверка наличия всех необходимых точек
-        if len(keypoints) < 17:
-            return None
-
-        # Функция для вычисления угла между тремя точками
-        def calculate_angle(a, b, c):
-            a = np.array(a)
-            b = np.array(b)
-            c = np.array(c)
-            ba = a - b
-            bc = c - b
-            cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-            angle = np.arccos(cosine_angle)
-            return np.degrees(angle)
-
-        # Таз: среднее между правым и левым бедром (точки 11 и 12)
-        hip_center = (keypoints[11] + keypoints[12]) / 2
-
-        # 1. Угол правого колена (между бедром, колено, лодыжка)
-        right_knee = calculate_angle(keypoints[11], keypoints[13], keypoints[15])
-
-        # 2. Угол левого колена
-        left_knee = calculate_angle(keypoints[12], keypoints[14], keypoints[16])
-
-        # 3. Угол правого бедра (между тазом, бедро, колено)
-        right_hip = calculate_angle(hip_center, keypoints[11], keypoints[13])
-
-        # 4. Угол левого бедра
-        left_hip = calculate_angle(hip_center, keypoints[12], keypoints[14])
-
-        # 5. Расстояние между коленями
-        dist_knees = np.linalg.norm(keypoints[13] - keypoints[14])
-
-        # 6. Расстояние между ступнями
-        dist_feet = np.linalg.norm(keypoints[15] - keypoints[16])
-
-        # 7. Глубина приседа (разница Y между тазом и средней лодыжкой)
-        ankle_y = (keypoints[15][1] + keypoints[16][1]) / 2
-        depth = hip_center[1] - ankle_y
-
-        # 8. Отклонение коленей от вертикали (для правой ноги)
-        knee_deviation = abs(keypoints[13][0] - keypoints[11][0])
-
-        # Нормализуем глубину относительно роста (примерное значение)
-        if keypoints[11][1] > 0 and keypoints[12][1] > 0:
-            height_estimate = max(keypoints[11][1], keypoints[12][1]) - min(keypoints[15][1], keypoints[16][1])
-            if height_estimate > 0:
-                depth = depth / height_estimate
-
-        features = [
-            right_knee, left_knee, right_hip, left_hip,
-            dist_knees, dist_feet, depth, knee_deviation
-        ]
-
-        return features
 
     def generate_unique_filenames(self, prefix=""):
         """Генерация уникальных имен файлов"""
@@ -663,6 +800,14 @@ class YOLOApp:
         # Запускаем скрипт обучения в отдельном процессе
         try:
             subprocess.Popen([sys.executable, 'train_squat_model.py'])
+            # Путь к файлу с графиком
+            graph_path = os.path.join(os.path.dirname(__file__), 'training_history.png')
+
+            # Проверка, существует ли файл графика
+            if os.path.exists(graph_path):
+                self.show_info(f"Обучение модели завершено. График сохранён в {graph_path}")
+            else:
+                self.show_error("График обучения не был создан. Возможно, произошла ошибка.")
             self.show_info("Запущено обучение модели. Пожалуйста, подождите...")
         except Exception as e:
             self.show_error(f"Ошибка при запуске обучения: {str(e)}")
@@ -688,7 +833,7 @@ def check_models():
         print("❌ Отсутствуют модели:")
         for model in missing_models:
             print(f"  - {model}")
-        print("Скачайте модели с https://github.com/ultralytics/ultralytics/releases")
+        print("Скачайте модели с https://github.com/ultralytics/ultralytics/releases  ")
         return False
     return True
 

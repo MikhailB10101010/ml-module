@@ -31,6 +31,10 @@ class DataCollector:
         self.csv_writer = None
         self.current_label = "correct"  # Текущая метка: correct или incorrect
 
+        # Счётчики папок
+        self.correct_count = self.get_folder_count("correct")
+        self.incorrect_count = self.get_folder_count("incorrect")
+
         # Создание интерфейса
         self.create_widgets()
 
@@ -39,6 +43,18 @@ class DataCollector:
 
         # Загрузка модели YOLO для отображения ключевых точек
         self.model = YOLO('yolov8l-pose.pt')
+
+    def get_folder_count(self, folder_name):
+        """Получает количество существующих папок с определённой меткой"""
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        base_records_folder = os.path.join(desktop_path, "Собранные данные")
+        records_folder = os.path.join(base_records_folder, folder_name)
+
+        if not os.path.exists(records_folder):
+            return 0
+
+        folders = [d for d in os.listdir(records_folder) if os.path.isdir(os.path.join(records_folder, d))]
+        return len(folders)
 
     def create_widgets(self):
         # Заголовок
@@ -286,21 +302,23 @@ class DataCollector:
         if not os.path.exists(records_folder):
             os.makedirs(records_folder)
 
-        # Генерируем уникальное имя
-        base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        video_filename = os.path.join(records_folder, f"{base_name}.mp4")
-        csv_filename = os.path.join(records_folder, f"{base_name}.csv")
+        # Определяем следующий номер папки
+        count = self.correct_count if label == "correct" else self.incorrect_count
+        folder_name = f"{count + 1:04d}"
+        folder_path = os.path.join(records_folder, folder_name)
 
-        # Проверяем существование файлов и добавляем номер
-        counter = 1
-        original_video = video_filename
-        original_csv = csv_filename
+        # Создаем папку
+        os.makedirs(folder_path)
 
-        while os.path.exists(video_filename) or os.path.exists(csv_filename):
-            name_without_ext = os.path.splitext(os.path.basename(original_video))[0]
-            video_filename = os.path.join(records_folder, f"{name_without_ext}_{counter}.mp4")
-            csv_filename = os.path.join(records_folder, f"{name_without_ext}_{counter}.csv")
-            counter += 1
+        # Обновляем счётчик
+        if label == "correct":
+            self.correct_count += 1
+        else:
+            self.incorrect_count += 1
+
+        # Имена файлов
+        video_filename = os.path.join(folder_path, "video.mp4")
+        csv_filename = os.path.join(folder_path, "data.csv")
 
         return video_filename, csv_filename
 

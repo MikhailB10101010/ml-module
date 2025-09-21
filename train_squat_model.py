@@ -7,6 +7,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
 import cv2
 from ultralytics import YOLO
+import matplotlib.pyplot as plt
 import csv
 import json
 import argparse
@@ -29,7 +30,7 @@ def calculate_squat_features(keypoints):
         ba = a - b
         bc = c - b
         cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-        angle = np.arccos(cosine_angle)
+        angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))  # предотвращаем ошибки из-за нестабильности
         return np.degrees(angle)
 
     # Таз: среднее между правым и левым бедром (точки 11 и 12)
@@ -75,25 +76,35 @@ def calculate_squat_features(keypoints):
 
 
 def load_dataset(dataset_path):
-    """Загрузка данных из датасета"""
+    """Загрузка данных из датасета с поддержкой новой структуры папок"""
     X = []
     y = []
 
     # Загрузка правильных приседаний
     correct_dir = os.path.join(dataset_path, 'train', 'correct')
-    for video_file in os.listdir(correct_dir):
-        if video_file.endswith('.mp4'):
-            video_path = os.path.join(correct_dir, video_file)
-            features, labels = process_video(video_path, 1)
+    for folder in sorted(os.listdir(correct_dir)):
+        folder_path = os.path.join(correct_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        video_file = os.path.join(folder_path, "video.mp4")
+        if os.path.exists(video_file):
+            print(f"Обработка правильного видео: {video_file}")
+            features, labels = process_video(video_file, 1)
             X.extend(features)
             y.extend(labels)
 
     # Загрузка неправильных приседаний
     incorrect_dir = os.path.join(dataset_path, 'train', 'incorrect')
-    for video_file in os.listdir(incorrect_dir):
-        if video_file.endswith('.mp4'):
-            video_path = os.path.join(incorrect_dir, video_file)
-            features, labels = process_video(video_path, 0)
+    for folder in sorted(os.listdir(incorrect_dir)):
+        folder_path = os.path.join(incorrect_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        video_file = os.path.join(folder_path, "video.mp4")
+        if os.path.exists(video_file):
+            print(f"Обработка неправильного видео: {video_file}")
+            features, labels = process_video(video_file, 0)
             X.extend(features)
             y.extend(labels)
 
@@ -101,19 +112,29 @@ def load_dataset(dataset_path):
     val_X = []
     val_y = []
 
-    correct_dir = os.path.join(dataset_path, 'val', 'correct')
-    for video_file in os.listdir(correct_dir):
-        if video_file.endswith('.mp4'):
-            video_path = os.path.join(correct_dir, video_file)
-            features, labels = process_video(video_path, 1)
+    correct_val_dir = os.path.join(dataset_path, 'val', 'correct')
+    for folder in sorted(os.listdir(correct_val_dir)):
+        folder_path = os.path.join(correct_val_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        video_file = os.path.join(folder_path, "video.mp4")
+        if os.path.exists(video_file):
+            print(f"Обработка валидационного правильного видео: {video_file}")
+            features, labels = process_video(video_file, 1)
             val_X.extend(features)
             val_y.extend(labels)
 
-    incorrect_dir = os.path.join(dataset_path, 'val', 'incorrect')
-    for video_file in os.listdir(incorrect_dir):
-        if video_file.endswith('.mp4'):
-            video_path = os.path.join(incorrect_dir, video_file)
-            features, labels = process_video(video_path, 0)
+    incorrect_val_dir = os.path.join(dataset_path, 'val', 'incorrect')
+    for folder in sorted(os.listdir(incorrect_val_dir)):
+        folder_path = os.path.join(incorrect_val_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        video_file = os.path.join(folder_path, "video.mp4")
+        if os.path.exists(video_file):
+            print(f"Обработка валидационного неправильного видео: {video_file}")
+            features, labels = process_video(video_file, 0)
             val_X.extend(features)
             val_y.extend(labels)
 
@@ -230,34 +251,39 @@ def main():
         callbacks=[early_stop]
     )
 
-    # Сохранение модели
-    model.save('squat_model.h5')
-    print("✅ Модель сохранена в 'squat_model.h5'")
-
     # Оценка модели
     test_loss, test_acc = model.evaluate(X_val, y_val)
     print(f"Точность на валидационных данных: {test_acc:.4f}")
 
-    # Вывод графика обучения (опционально)
+    # Вывод графика обучения
     try:
-        import matplotlib.pyplot as plt
         plt.figure(figsize=(12, 4))
+
+        # График точности
         plt.subplot(1, 2, 1)
         plt.plot(history.history['accuracy'], label='Тренировочная точность')
         plt.plot(history.history['val_accuracy'], label='Валидационная точность')
         plt.title('Точность')
+        plt.xlabel('Эпоха')
+        plt.ylabel('Точность')
         plt.legend()
 
+        # График потерь
         plt.subplot(1, 2, 2)
         plt.plot(history.history['loss'], label='Тренировочная потеря')
         plt.plot(history.history['val_loss'], label='Валидационная потеря')
         plt.title('Потеря')
+        plt.xlabel('Эпоха')
+        plt.ylabel('Потеря')
         plt.legend()
 
+        # Сохранение графика
+        plt.tight_layout()
         plt.savefig('training_history.png')
-        print("График обучения сохранен в 'training_history.png'")
-    except:
-        pass
+        print("✅ График обучения сохранен в 'training_history.png'")
+
+    except Exception as e:
+        print(f"❌ Не удалось сохранить график: {e}")
 
 
 if __name__ == "__main__":
