@@ -11,7 +11,7 @@ import queue
 import time
 import uuid
 from ultralytics import YOLO
-from PIL import Image, ImageTk  # Добавлено для отображения кадров
+from PIL import Image, ImageTk  # Для отображения кадров
 
 
 class DataCollector:
@@ -86,6 +86,11 @@ class DataCollector:
                                    command=self.load_video_file, width=20)
         self.load_btn.pack(side=tk.LEFT, padx=5)
 
+        # Кнопка предпросмотра
+        self.preview_btn = ttk.Button(button_frame, text="👁️ Предпросмотр",
+                                      command=self.show_preview, width=20, state='disabled')
+        self.preview_btn.pack(side=tk.LEFT, padx=5)
+
         # Таймер
         self.timer_label = ttk.Label(button_frame, text="00:00:00",
                                      font=('Arial', 14, 'bold'), foreground="blue")
@@ -129,6 +134,7 @@ class DataCollector:
         self.start_time = time.time()
         self.record_btn.config(text="■ Остановить запись")
         self.status_label.config(text="Запись ведётся...", foreground="red")
+        self.preview_btn.config(state='disabled')  # Отключаем предпросмотр во время записи
 
         # Инициализация камеры
         self.cap = cv2.VideoCapture(0)
@@ -159,7 +165,6 @@ class DataCollector:
         # Создаем CSV-файл
         self.csv_file = open(csv_filename, 'w', newline='', encoding='utf-8')
         self.csv_writer = csv.writer(self.csv_file)
-        # Заголовки CSV: frame_time, point_0_x, point_0_y, ..., point_16_x, point_16_y
         headers = ['timestamp'] + [f'point_{i}_{coord}' for i in range(17) for coord in ['x', 'y']]
         self.csv_writer.writerow(headers)
 
@@ -175,6 +180,7 @@ class DataCollector:
         self.is_recording = False
         self.record_btn.config(text="▶ Начать запись")
         self.status_label.config(text="Запись остановлена", foreground="gray")
+        self.preview_btn.config(state='normal')  # Включаем предпросмотр после остановки
 
         # Освобождение ресурсов
         if hasattr(self, 'cap'):
@@ -194,6 +200,15 @@ class DataCollector:
             # Обработка кадра YOLO
             results = self.model(frame)
             annotated_frame = results[0].plot()
+
+            # Подсветка кистей (важно для обучения!)
+            keypoints = results[0].keypoints.xy.cpu().numpy()
+            if len(keypoints) > 0:
+                kp = keypoints[0]
+                # Подсветка кистей (точки 17 и 18)
+                for idx in [17, 18]:
+                    x, y = int(kp[idx][0]), int(kp[idx][1])
+                    cv2.circle(annotated_frame, (x, y), 8, (0, 255, 0), -1)  # Зелёный круг
 
             # Запись в видеофайл
             self.video_writer.write(annotated_frame)
@@ -265,6 +280,15 @@ class DataCollector:
             # Обработка YOLO
             results = self.model(frame)
             annotated_frame = results[0].plot()
+
+            # Подсветка кистей
+            keypoints = results[0].keypoints.xy.cpu().numpy()
+            if len(keypoints) > 0:
+                kp = keypoints[0]
+                for idx in [17, 18]:
+                    x, y = int(kp[idx][0]), int(kp[idx][1])
+                    cv2.circle(annotated_frame, (x, y), 8, (0, 255, 0), -1)
+
             video_writer.write(annotated_frame)
 
             # Ключевые точки
@@ -368,6 +392,63 @@ class DataCollector:
         new_height = min(height, int(width / aspect_ratio))
 
         return cv2.resize(frame, (new_width, new_height))
+
+    def show_preview(self):
+        """Предпросмотр последнего записанного видео"""
+        # Находим последнюю папку с данными
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        base_records_folder = os.path.join(desktop_path, "Собранные данные")
+        records_folder = os.path.join(base_records_folder, self.current_label)
+
+        if not os.path.exists(records_folder):
+            self.show_error("Нет данных для просмотра!")
+            return
+
+        # Находим последнюю папку по имени
+        folders = [d for d in os.listdir(records_folder) if os.path.isdir(os.path.join(records_folder, d))]
+        if not folders:
+            self.show_error("Нет записанных видео!")
+            return
+
+        latest_folder = sorted(folders, reverse=True)[0]
+        folder_path = os.path.join(records_folder, latest_folder)
+        video_path = os.path.join(folder_path, "video.mp4")
+
+        if not os.path.exists(video_path):
+            self.show_error("Видео не найдено!")
+            return
+
+        # Запуск предпросмотра в новом окне
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title("Предпросмотр видео")
+        preview_window.geometry("800x600")
+
+        # Простой видеоплеер
+        preview_label = ttk.Label(preview_window, background="black", relief="solid", borderwidth=1)
+        preview_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Открываем видео
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            self.show_error("Не удалось открыть видео!")
+            preview_window.destroy()
+            return
+
+        # Проигрывание видео
+        def play_video():
+            ret, frame = cap.read()
+            if ret:
+                # Преобразуем кадр
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(frame_rgb)
+                photo = ImageTk.PhotoImage(img)
+                preview_label.config(image=photo)
+                preview_label.image = photo
+                preview_label.after(33, play_video)  # ~30 FPS
+            else:
+                preview_window.destroy()
+
+        play_video()
 
     def show_error(self, message):
         """Показ сообщения об ошибке"""

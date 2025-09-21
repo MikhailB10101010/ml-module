@@ -382,21 +382,21 @@ class YOLOApp:
         # 8. Отклонение коленей от вертикали (правая нога)
         knee_deviation = abs(keypoints[13][0] - keypoints[11][0])
 
-        # 9. Расстояние между кистями (руки сложены в замок)
-        wrist_distance = np.linalg.norm(keypoints[17] - keypoints[18])  # точки 17 и 18 — кисти
+        # 9. Расстояние между запястьями (руки сложены в замок)
+        wrist_distance = np.linalg.norm(keypoints[15] - keypoints[16])  # Запястья
 
-        # 10. Высота кистей относительно ключиц
+        # 10. Высота запястий относительно ключиц
         clavicle_y = (keypoints[13][1] + keypoints[14][1]) / 2
-        wrist_height = (keypoints[17][1] + keypoints[18][1]) / 2
+        wrist_height = (keypoints[15][1] + keypoints[16][1]) / 2
         wrist_clavicle_diff = wrist_height - clavicle_y
 
-        # 11. Расстояние от корпуса до кистей
+        # 11. Расстояние от корпуса до запястий
         shoulder_center = (keypoints[13] + keypoints[14]) / 2
-        wrist_to_body_dist = np.linalg.norm(keypoints[17] - shoulder_center)
+        wrist_to_body_dist = np.linalg.norm(keypoints[15] - shoulder_center)
 
         # 12. Угол между руками и телом
-        right_arm_vector = keypoints[17] - keypoints[13]
-        left_arm_vector = keypoints[18] - keypoints[14]
+        right_arm_vector = keypoints[15] - keypoints[13]
+        left_arm_vector = keypoints[16] - keypoints[14]
         body_vector = hip_center - keypoints[13]
         right_arm_angle = np.arccos(np.clip(np.dot(right_arm_vector, body_vector) /
                                             (np.linalg.norm(right_arm_vector) * np.linalg.norm(body_vector)), -1.0,
@@ -418,7 +418,7 @@ class YOLOApp:
             wrist_distance, wrist_clavicle_diff, wrist_to_body_dist, arm_body_angle
         ]
 
-        return features
+        return features  # ❌ Убираем errors
 
     def process_camera_video(self):
         """Основной цикл обработки видео с камеры"""
@@ -427,7 +427,7 @@ class YOLOApp:
             if not ret:
                 break
 
-            # Обработка кадра
+            # Обработка кадра YOLO
             device = 'cuda' if self.config['use_gpu'] and self.check_cuda_available() else 'cpu'
             results = self.model(frame, device=device)
             annotated_frame = results[0].plot()
@@ -449,7 +449,7 @@ class YOLOApp:
             # Обработка признаков для приседаний
             if len(keypoints) > 0 and self.squat_model is not None:
                 kp = keypoints[0]  # Первая персона
-                features, errors = self.calculate_squat_features(kp)
+                features = self.calculate_squat_features(kp)  # ❌ Убираем errors
 
                 if features is not None:
                     self.feature_sequence.append(features)
@@ -493,27 +493,27 @@ class YOLOApp:
                             yellow_points = []
 
                             # Список точек по индексам ошибок (расширенный)
-                            point_map = [13, 14, 11, 12, 13, 14, 13, 13, 17, 18, 17, 18]  # добавлены кисти
+                            point_map = [13, 14, 11, 12, 13, 14, 13, 13, 15, 16, 15, 16]  # запястья вместо кистей
 
                             # Ошибки рук
-                            wrist_distance = np.linalg.norm(kp[17] - kp[18])
-                            wrist_clavicle_diff = (kp[17][1] + kp[18][1]) / 2 - (kp[13][1] + kp[14][1]) / 2
-                            wrist_to_body_dist = np.linalg.norm(kp[17] - (kp[13] + kp[14]) / 2)
+                            wrist_distance = np.linalg.norm(kp[15] - kp[16])
+                            wrist_clavicle_diff = (kp[15][1] + kp[16][1]) / 2 - (kp[13][1] + kp[14][1]) / 2
+                            wrist_to_body_dist = np.linalg.norm(kp[15] - (kp[13] + kp[14]) / 2)
 
                             # Кисти слишком далеко друг от друга
                             if wrist_distance > 0.2:
-                                red_points.append(17)
-                                red_points.append(18)
+                                red_points.append(15)
+                                red_points.append(16)
 
                             # Кисти слишком низко
                             if wrist_clavicle_diff > 0.1:
-                                yellow_points.append(17)
-                                yellow_points.append(18)
+                                yellow_points.append(15)
+                                yellow_points.append(16)
 
                             # Руки слишком близко к телу
                             if wrist_to_body_dist < 0.1:
-                                yellow_points.append(17)
-                                yellow_points.append(18)
+                                yellow_points.append(15)
+                                yellow_points.append(16)
 
                             # Подсветка точек
                             for point_idx in red_points:
@@ -613,7 +613,7 @@ class YOLOApp:
                 # Обработка признаков для приседаний
                 if len(keypoints) > 0 and self.squat_model is not None:
                     kp = keypoints[0]  # Первая персона
-                    features, errors = self.calculate_squat_features(kp)
+                    features = self.calculate_squat_features(kp)  # ❌ Убираем errors
 
                     if features is not None:
                         self.feature_sequence.append(features)
@@ -657,27 +657,27 @@ class YOLOApp:
                                 yellow_points = []
 
                                 # Список точек по индексам ошибок (расширенный)
-                                point_map = [13, 14, 11, 12, 13, 14, 13, 13, 17, 18, 17, 18]
+                                point_map = [13, 14, 11, 12, 13, 14, 13, 13, 15, 16, 15, 16]
 
                                 # Ошибки рук
-                                wrist_distance = np.linalg.norm(kp[17] - kp[18])
-                                wrist_clavicle_diff = (kp[17][1] + kp[18][1]) / 2 - (kp[13][1] + kp[14][1]) / 2
-                                wrist_to_body_dist = np.linalg.norm(kp[17] - (kp[13] + kp[14]) / 2)
+                                wrist_distance = np.linalg.norm(kp[15] - kp[16])
+                                wrist_clavicle_diff = (kp[15][1] + kp[16][1]) / 2 - (kp[13][1] + kp[14][1]) / 2
+                                wrist_to_body_dist = np.linalg.norm(kp[15] - (kp[13] + kp[14]) / 2)
 
                                 # Кисти слишком далеко друг от друга
                                 if wrist_distance > 0.2:
-                                    red_points.append(17)
-                                    red_points.append(18)
+                                    red_points.append(15)
+                                    red_points.append(16)
 
                                 # Кисти слишком низко
                                 if wrist_clavicle_diff > 0.1:
-                                    yellow_points.append(17)
-                                    yellow_points.append(18)
+                                    yellow_points.append(15)
+                                    yellow_points.append(16)
 
                                 # Руки слишком близко к телу
                                 if wrist_to_body_dist < 0.1:
-                                    yellow_points.append(17)
-                                    yellow_points.append(18)
+                                    yellow_points.append(15)
+                                    yellow_points.append(16)
 
                                 # Подсветка точек
                                 for point_idx in red_points:
@@ -842,7 +842,7 @@ def check_models():
         print("❌ Отсутствуют модели:")
         for model in missing_models:
             print(f"  - {model}")
-        print("Скачайте модели с https://github.com/ultralytics/ultralytics/releases  ")
+        print("Скачайте модели с https://github.com/ultralytics/ultralytics/releases    ")
         return False
     return True
 

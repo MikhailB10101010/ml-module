@@ -60,25 +60,26 @@ def calculate_squat_features(keypoints):
     # 8. Отклонение коленей от вертикали (правая нога)
     knee_deviation = abs(keypoints[13][0] - keypoints[11][0])
 
-    # 9. Расстояние между кистями (руки сложены в замок)
-    wrist_distance = np.linalg.norm(keypoints[17] - keypoints[18])  # точки 17 и 18 — кисти
+    # ----------------------------
+    # 🛠️ НОВЫЕ ПРИЗНАКИ: Положение рук (запястья)
+    # ----------------------------
 
-    # 10. Высота кистей относительно ключиц (точка 13 — правое плечо, 14 — левое)
+    # 9. Расстояние между запястьями (руки сложены в замок)
+    wrist_distance = np.linalg.norm(keypoints[15] - keypoints[16])  # Запястья
+
+    # 10. Высота запястий относительно ключиц
     clavicle_y = (keypoints[13][1] + keypoints[14][1]) / 2
-    wrist_height = (keypoints[17][1] + keypoints[18][1]) / 2
-    wrist_clavicle_diff = wrist_height - clavicle_y  # должно быть ~0 для правильного положения
+    wrist_height = (keypoints[15][1] + keypoints[16][1]) / 2
+    wrist_clavicle_diff = wrist_height - clavicle_y
 
-    # 11. Расстояние от корпуса до кистей (проверка "отдалённости")
+    # 11. Расстояние от корпуса до запястий
     shoulder_center = (keypoints[13] + keypoints[14]) / 2
-    wrist_to_body_dist = np.linalg.norm(keypoints[17] - shoulder_center)  # расстояние от кисти до центра плеч
+    wrist_to_body_dist = np.linalg.norm(keypoints[15] - shoulder_center)
 
-    # 12. Угол между руками и телом (для оценки "вытянутости" рук)
-    # Вектор от плеча к кисти
-    right_arm_vector = keypoints[17] - keypoints[13]
-    left_arm_vector = keypoints[18] - keypoints[14]
-    # Вектор от плеча к центру тела
+    # 12. Угол между руками и телом
+    right_arm_vector = keypoints[15] - keypoints[13]
+    left_arm_vector = keypoints[16] - keypoints[14]
     body_vector = hip_center - keypoints[13]
-    # Угол между рукой и телом
     right_arm_angle = np.arccos(np.clip(np.dot(right_arm_vector, body_vector) /
                                         (np.linalg.norm(right_arm_vector) * np.linalg.norm(body_vector)), -1.0, 1.0))
     left_arm_angle = np.arccos(np.clip(np.dot(left_arm_vector, body_vector) /
@@ -313,6 +314,12 @@ def main():
 
     except Exception as e:
         print(f"❌ Не удалось сохранить график: {e}")
+
+    try:
+        model.save('squat_model.h5')
+        print("✅ Модель сохранена в 'squat_model.h5'")
+    except Exception as e:
+        print(f"❌ Ошибка при сохранении модели: {e}")
 
 
 if __name__ == "__main__":
