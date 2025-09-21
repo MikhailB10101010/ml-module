@@ -2,7 +2,7 @@ import os
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
 import cv2
@@ -10,12 +10,11 @@ from ultralytics import YOLO
 import matplotlib.pyplot as plt
 import csv
 import json
-import argparse
 import math
 
 
 def calculate_squat_features(keypoints):
-    """Вычисление признаков для анализа приседаний"""
+    """Вычисление признаков для анализа приседаний (с учётом положения рук)"""
     features = []
 
     # Проверка наличия всех необходимых точек
@@ -30,19 +29,19 @@ def calculate_squat_features(keypoints):
         ba = a - b
         bc = c - b
         cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-        angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))  # предотвращаем ошибки из-за нестабильности
+        angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
         return np.degrees(angle)
 
     # Таз: среднее между правым и левым бедром (точки 11 и 12)
     hip_center = (keypoints[11] + keypoints[12]) / 2
 
-    # 1. Угол правого колена (между бедром, колено, лодыжка)
+    # 1. Угол правого колена
     right_knee = calculate_angle(keypoints[11], keypoints[13], keypoints[15])
 
     # 2. Угол левого колена
     left_knee = calculate_angle(keypoints[12], keypoints[14], keypoints[16])
 
-    # 3. Угол правого бедра (между тазом, бедро, колено)
+    # 3. Угол правого бедра
     right_hip = calculate_angle(hip_center, keypoints[11], keypoints[13])
 
     # 4. Угол левого бедра
@@ -54,22 +53,49 @@ def calculate_squat_features(keypoints):
     # 6. Расстояние между ступнями
     dist_feet = np.linalg.norm(keypoints[15] - keypoints[16])
 
-    # 7. Глубина приседа (разница Y между тазом и средней лодыжкой)
+    # 7. Глубина приседа
     ankle_y = (keypoints[15][1] + keypoints[16][1]) / 2
     depth = hip_center[1] - ankle_y
 
-    # 8. Отклонение коленей от вертикали (для правой ноги)
+    # 8. Отклонение коленей от вертикали (правая нога)
     knee_deviation = abs(keypoints[13][0] - keypoints[11][0])
 
-    # Нормализуем глубину относительно роста (примерное значение)
+    # 9. Расстояние между кистями (руки сложены в замок)
+    wrist_distance = np.linalg.norm(keypoints[17] - keypoints[18])  # точки 17 и 18 — кисти
+
+    # 10. Высота кистей относительно ключиц (точка 13 — правое плечо, 14 — левое)
+    clavicle_y = (keypoints[13][1] + keypoints[14][1]) / 2
+    wrist_height = (keypoints[17][1] + keypoints[18][1]) / 2
+    wrist_clavicle_diff = wrist_height - clavicle_y  # должно быть ~0 для правильного положения
+
+    # 11. Расстояние от корпуса до кистей (проверка "отдалённости")
+    shoulder_center = (keypoints[13] + keypoints[14]) / 2
+    wrist_to_body_dist = np.linalg.norm(keypoints[17] - shoulder_center)  # расстояние от кисти до центра плеч
+
+    # 12. Угол между руками и телом (для оценки "вытянутости" рук)
+    # Вектор от плеча к кисти
+    right_arm_vector = keypoints[17] - keypoints[13]
+    left_arm_vector = keypoints[18] - keypoints[14]
+    # Вектор от плеча к центру тела
+    body_vector = hip_center - keypoints[13]
+    # Угол между рукой и телом
+    right_arm_angle = np.arccos(np.clip(np.dot(right_arm_vector, body_vector) /
+                                        (np.linalg.norm(right_arm_vector) * np.linalg.norm(body_vector)), -1.0, 1.0))
+    left_arm_angle = np.arccos(np.clip(np.dot(left_arm_vector, body_vector) /
+                                       (np.linalg.norm(left_arm_vector) * np.linalg.norm(body_vector)), -1.0, 1.0))
+    arm_body_angle = (right_arm_angle + left_arm_angle) / 2
+
+    # Нормализация глубины относительно роста
     if keypoints[11][1] > 0 and keypoints[12][1] > 0:
         height_estimate = max(keypoints[11][1], keypoints[12][1]) - min(keypoints[15][1], keypoints[16][1])
         if height_estimate > 0:
             depth = depth / height_estimate
 
+    # Сбор всех признаков
     features = [
         right_knee, left_knee, right_hip, left_hip,
-        dist_knees, dist_feet, depth, knee_deviation
+        dist_knees, dist_feet, depth, knee_deviation,
+        wrist_distance, wrist_clavicle_diff, wrist_to_body_dist, arm_body_angle
     ]
 
     return features
@@ -177,14 +203,17 @@ def process_video(video_path, label):
 
 
 def build_lstm_model(sequence_length, num_features):
-    """Создание LSTM модели"""
-    model = Sequential()
-    model.add(Bidirectional(LSTM(64, return_sequences=True, input_shape=(sequence_length, num_features))))
-    model.add(Dropout(0.3))
-    model.add(Bidirectional(LSTM(32)))
-    model.add(Dropout(0.3))
-    model.add(Dense(16, activation='relu'))
-    model.add(Dense(1, activation='sigmoid'))
+    """Создание LSTM модели с улучшенной регуляризацией"""
+    model = Sequential([
+        Bidirectional(LSTM(64, return_sequences=True, input_shape=(sequence_length, num_features))),
+        Dropout(0.5),
+        BatchNormalization(),
+        Bidirectional(LSTM(32)),
+        Dropout(0.5),
+        Dense(16, activation='relu'),
+        Dropout(0.3),
+        Dense(1, activation='sigmoid')
+    ])
 
     model.compile(
         optimizer=Adam(learning_rate=0.001),

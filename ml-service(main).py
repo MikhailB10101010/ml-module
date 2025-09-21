@@ -336,14 +336,12 @@ class YOLOApp:
         return np.array(img_pil)
 
     def calculate_squat_features(self, keypoints):
-        """Вычисление признаков для анализа приседаний"""
-        # keypoints: numpy array shape [17, 2] (координаты точек)
+        """Вычисление признаков для анализа приседаний (с учётом положения рук)"""
         features = []
-        errors = []  # 0=нет, 1=предупреждение, 2=ошибка
 
         # Проверка наличия всех необходимых точек
         if len(keypoints) < 17:
-            return None, None
+            return None
 
         # Функция для вычисления угла между тремя точками
         def calculate_angle(a, b, c):
@@ -353,7 +351,7 @@ class YOLOApp:
             ba = a - b
             bc = c - b
             cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-            angle = np.arccos(cosine_angle)
+            angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
             return np.degrees(angle)
 
         # Таз: среднее между правым и левым бедром (точки 11 и 12)
@@ -361,83 +359,66 @@ class YOLOApp:
 
         # 1. Угол правого колена
         right_knee = calculate_angle(keypoints[11], keypoints[13], keypoints[15])
-        error_right_knee = 0
-        if right_knee < 80:
-            error_right_knee = 2
-        elif right_knee < 90:
-            error_right_knee = 1
 
         # 2. Угол левого колена
         left_knee = calculate_angle(keypoints[12], keypoints[14], keypoints[16])
-        error_left_knee = 0
-        if left_knee < 80:
-            error_left_knee = 2
-        elif left_knee < 90:
-            error_left_knee = 1
 
         # 3. Угол правого бедра
         right_hip = calculate_angle(hip_center, keypoints[11], keypoints[13])
-        error_right_hip = 0
-        if right_hip > 130:
-            error_right_hip = 2
-        elif right_hip > 120:
-            error_right_hip = 1
 
         # 4. Угол левого бедра
         left_hip = calculate_angle(hip_center, keypoints[12], keypoints[14])
-        error_left_hip = 0
-        if left_hip > 130:
-            error_left_hip = 2
-        elif left_hip > 120:
-            error_left_hip = 1
 
         # 5. Расстояние между коленями
         dist_knees = np.linalg.norm(keypoints[13] - keypoints[14])
-        error_knees = 0
-        if dist_knees < 0.05:
-            error_knees = 2
-        elif dist_knees < 0.1:
-            error_knees = 1
 
         # 6. Расстояние между ступнями
         dist_feet = np.linalg.norm(keypoints[15] - keypoints[16])
-        error_feet = 0
-        if dist_feet < 0.15:
-            error_feet = 2
-        elif dist_feet < 0.2:
-            error_feet = 1
 
         # 7. Глубина приседа
         ankle_y = (keypoints[15][1] + keypoints[16][1]) / 2
         depth = hip_center[1] - ankle_y
 
-        # 8. Отклонение коленей от вертикали
+        # 8. Отклонение коленей от вертикали (правая нога)
         knee_deviation = abs(keypoints[13][0] - keypoints[11][0])
-        error_knee_deviation = 0
-        if knee_deviation > 0.15:
-            error_knee_deviation = 2
-        elif knee_deviation > 0.1:
-            error_knee_deviation = 1
 
-        # Нормализуем глубину относительно роста
+        # 9. Расстояние между кистями (руки сложены в замок)
+        wrist_distance = np.linalg.norm(keypoints[17] - keypoints[18])  # точки 17 и 18 — кисти
+
+        # 10. Высота кистей относительно ключиц
+        clavicle_y = (keypoints[13][1] + keypoints[14][1]) / 2
+        wrist_height = (keypoints[17][1] + keypoints[18][1]) / 2
+        wrist_clavicle_diff = wrist_height - clavicle_y
+
+        # 11. Расстояние от корпуса до кистей
+        shoulder_center = (keypoints[13] + keypoints[14]) / 2
+        wrist_to_body_dist = np.linalg.norm(keypoints[17] - shoulder_center)
+
+        # 12. Угол между руками и телом
+        right_arm_vector = keypoints[17] - keypoints[13]
+        left_arm_vector = keypoints[18] - keypoints[14]
+        body_vector = hip_center - keypoints[13]
+        right_arm_angle = np.arccos(np.clip(np.dot(right_arm_vector, body_vector) /
+                                            (np.linalg.norm(right_arm_vector) * np.linalg.norm(body_vector)), -1.0,
+                                            1.0))
+        left_arm_angle = np.arccos(np.clip(np.dot(left_arm_vector, body_vector) /
+                                           (np.linalg.norm(left_arm_vector) * np.linalg.norm(body_vector)), -1.0, 1.0))
+        arm_body_angle = (right_arm_angle + left_arm_angle) / 2
+
+        # Нормализация глубины
         if keypoints[11][1] > 0 and keypoints[12][1] > 0:
             height_estimate = max(keypoints[11][1], keypoints[12][1]) - min(keypoints[15][1], keypoints[16][1])
             if height_estimate > 0:
                 depth = depth / height_estimate
 
+        # Сбор всех признаков
         features = [
             right_knee, left_knee, right_hip, left_hip,
-            dist_knees, dist_feet, depth, knee_deviation
+            dist_knees, dist_feet, depth, knee_deviation,
+            wrist_distance, wrist_clavicle_diff, wrist_to_body_dist, arm_body_angle
         ]
 
-        errors = [
-            error_right_knee, error_left_knee,
-            error_right_hip, error_left_hip,
-            error_knees, error_feet,
-            0, error_knee_deviation  # Последний элемент — отклонение колена
-        ]
-
-        return features, errors
+        return features
 
     def process_camera_video(self):
         """Основной цикл обработки видео с камеры"""
@@ -507,20 +488,34 @@ class YOLOApp:
                             annotated_frame = self.add_text_pil(annotated_frame, text, (50, 50), color)
 
                         # Выделяем проблемные точки при ошибке
-                        if not is_correct and self.is_squatting and len(errors) >= 8:
+                        if not is_correct and self.is_squatting:
                             red_points = []
                             yellow_points = []
 
-                            # Список точек по индексам ошибок
-                            point_map = [13, 14, 11, 12, 13, 14, 13, 13]  # Соответствие индексов ошибок
+                            # Список точек по индексам ошибок (расширенный)
+                            point_map = [13, 14, 11, 12, 13, 14, 13, 13, 17, 18, 17, 18]  # добавлены кисти
 
-                            for i in range(min(len(errors), len(point_map))):
-                                if errors[i] == 2:
-                                    red_points.append(point_map[i])
-                                elif errors[i] == 1:
-                                    yellow_points.append(point_map[i])
+                            # Ошибки рук
+                            wrist_distance = np.linalg.norm(kp[17] - kp[18])
+                            wrist_clavicle_diff = (kp[17][1] + kp[18][1]) / 2 - (kp[13][1] + kp[14][1]) / 2
+                            wrist_to_body_dist = np.linalg.norm(kp[17] - (kp[13] + kp[14]) / 2)
 
-                            # Выделяем точки
+                            # Кисти слишком далеко друг от друга
+                            if wrist_distance > 0.2:
+                                red_points.append(17)
+                                red_points.append(18)
+
+                            # Кисти слишком низко
+                            if wrist_clavicle_diff > 0.1:
+                                yellow_points.append(17)
+                                yellow_points.append(18)
+
+                            # Руки слишком близко к телу
+                            if wrist_to_body_dist < 0.1:
+                                yellow_points.append(17)
+                                yellow_points.append(18)
+
+                            # Подсветка точек
                             for point_idx in red_points:
                                 if point_idx < len(kp):
                                     x, y = int(kp[point_idx][0]), int(kp[point_idx][1])
@@ -657,20 +652,34 @@ class YOLOApp:
                                 annotated_frame = self.add_text_pil(annotated_frame, text, (50, 50), color)
 
                             # Выделяем проблемные точки при ошибке
-                            if not is_correct and self.is_squatting and len(errors) >= 8:
+                            if not is_correct and self.is_squatting:
                                 red_points = []
                                 yellow_points = []
 
-                                # Список точек по индексам ошибок
-                                point_map = [13, 14, 11, 12, 13, 14, 13, 13]  # Соответствие индексов ошибок
+                                # Список точек по индексам ошибок (расширенный)
+                                point_map = [13, 14, 11, 12, 13, 14, 13, 13, 17, 18, 17, 18]
 
-                                for i in range(min(len(errors), len(point_map))):
-                                    if errors[i] == 2:
-                                        red_points.append(point_map[i])
-                                    elif errors[i] == 1:
-                                        yellow_points.append(point_map[i])
+                                # Ошибки рук
+                                wrist_distance = np.linalg.norm(kp[17] - kp[18])
+                                wrist_clavicle_diff = (kp[17][1] + kp[18][1]) / 2 - (kp[13][1] + kp[14][1]) / 2
+                                wrist_to_body_dist = np.linalg.norm(kp[17] - (kp[13] + kp[14]) / 2)
 
-                                # Выделяем точки
+                                # Кисти слишком далеко друг от друга
+                                if wrist_distance > 0.2:
+                                    red_points.append(17)
+                                    red_points.append(18)
+
+                                # Кисти слишком низко
+                                if wrist_clavicle_diff > 0.1:
+                                    yellow_points.append(17)
+                                    yellow_points.append(18)
+
+                                # Руки слишком близко к телу
+                                if wrist_to_body_dist < 0.1:
+                                    yellow_points.append(17)
+                                    yellow_points.append(18)
+
+                                # Подсветка точек
                                 for point_idx in red_points:
                                     if point_idx < len(kp):
                                         x, y = int(kp[point_idx][0]), int(kp[point_idx][1])
@@ -690,7 +699,7 @@ class YOLOApp:
                     pass
 
                 # Обновление статуса
-                if frame_count % 30 == 0:  # Обновляем каждые 30 кадров
+                if frame_count % 30 == 0:
                     elapsed_time = time.time() - start_time
                     progress = (frame_count / total_frames) * 100
                     self.status_label.config(text=f"Обработка: {progress:.1f}%")
