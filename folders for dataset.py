@@ -133,6 +133,7 @@ def select_errors_with_preview(video_path, error_classes):
         selected_vars.append(var)
         checkboxes.append(cb)
 
+
     # Кнопка OK
     result = []
     def on_ok():

@@ -1,8 +1,8 @@
 import os
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Bidirectional, BatchNormalization
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 import cv2
@@ -10,13 +10,11 @@ from ultralytics import YOLO
 import matplotlib.pyplot as plt
 import json
 
-# Параметры
+# Параметры обучения
 SEQUENCE_LENGTH = 30
 BATCH_SIZE = 8
-EPOCHS = 100
+EPOCHS = 50
 
-ERROR_CLASSES = ["hands", "legs_width", "deep", "simmetry", "other_exercise"]
-N_ERROR_CLASSES = len(ERROR_CLASSES)
 
 def calculate_squat_features_v11(keypoints):
     """Вычисление признаков для анализа приседаний с использованием YOLOv11 индексов"""
@@ -99,6 +97,14 @@ def calculate_squat_features_v11(keypoints):
                                            (np.linalg.norm(left_arm_vector) * np.linalg.norm(body_vector)), -1.0, 1.0))
         arm_body_angle = (right_arm_angle + left_arm_angle) / 2
 
+        # Нормализация глубины относительно роста
+        if keypoints[11][1] > 0 and keypoints[12][1] > 0:
+            height_estimate = max(keypoints[11][1], keypoints[12][1]) - min(keypoints[15][1], keypoints[16][1])
+            if height_estimate > 0:
+                depth = depth / height_estimate
+
+        # --- НОВЫЕ ПРИЗНАКИ СИММЕТРИИ ---
+
         # 13. Разница в углах колен (симметрия)
         knee_angle_diff = abs(right_knee - left_knee)
 
@@ -117,7 +123,7 @@ def calculate_squat_features_v11(keypoints):
         # 18. Средняя симметрия (вспомогательный признак)
         avg_symmetry = (knee_angle_diff + hip_angle_diff + knee_deviation_diff + wrist_height_diff) / 4
 
-        # Сбор всех признаков
+        # Сбор всех признаков (19 штук)
         features = [
             right_knee, left_knee, right_hip, left_hip,
             dist_knees, dist_feet, depth, knee_deviation,
@@ -133,13 +139,13 @@ def calculate_squat_features_v11(keypoints):
         return None
 
 
-def process_video_file(video_file, label, error_labels_list):
-    """Обработка видео файла для извлечения признаков и меток ошибок"""
+def process_video_file(video_file, label):
+    """Обработка видео файла для извлечения признаков"""
+    # Используем YOLO напрямую для получения keypoints
     model = YOLO('yolo11l-pose.pt')
     cap = cv2.VideoCapture(video_file)
     features_list = []
-    correctness_labels = []
-    error_labels = []
+    labels_list = []
     sequence = []
 
     frame_count = 0
@@ -157,216 +163,215 @@ def process_video_file(video_file, label, error_labels_list):
             if features is not None:
                 sequence.append(features)
 
+                # Если набрали достаточную последовательность
                 if len(sequence) >= SEQUENCE_LENGTH:
                     features_array = np.array(sequence[-SEQUENCE_LENGTH:])
                     features_list.append(features_array)
-                    correctness_labels.append(label)
-                    error_labels.append(error_labels_list)
+                    labels_list.append(label)
 
         frame_count += 1
 
     cap.release()
     print(f"Обработано {frame_count} кадров, извлечено {len(features_list)} последовательностей")
-    return features_list, correctness_labels, error_labels
+    return features_list, labels_list
 
 
-def load_labeled_dataset(dataset_path):
-    """Загрузка размеченных данных с метками ошибок"""
+def load_unlabeled_dataset(dataset_path):
+    """Загрузка не размеченных данных для обучения"""
     X = []
-    y_correctness = []
-    y_errors = []
+    y = []
 
-    # Загрузка правильных приседаний
-    correct_dir = os.path.join(dataset_path, 'train', 'correct')
-    if os.path.exists(correct_dir):
-        for folder in sorted(os.listdir(correct_dir)):
-            folder_path = os.path.join(correct_dir, folder)
-            if not os.path.isdir(folder_path):
-                continue
-
-            video_file = os.path.join(folder_path, "video.mp4")
-            if os.path.exists(video_file):
-                print(f"Обработка правильного видео: {video_file}")
-                features, correctness, errors = process_video_file(video_file, 1, [0]*N_ERROR_CLASSES)
+    # Правильные приседания
+    good_squats_dir = os.path.join(dataset_path, 'good_squats')
+    if os.path.exists(good_squats_dir):
+        for video_file in os.listdir(good_squats_dir):
+            if video_file.endswith(('.mp4', '.avi', '.mov')):
+                video_path = os.path.join(good_squats_dir, video_file)
+                print(f"Обработка правильного приседания: {video_path}")
+                features, labels = process_video_file(video_path, 1)  # метка 1 = правильный
                 if len(features) > 0:
                     X.extend(features)
-                    y_correctness.extend(correctness)
-                    y_errors.extend(errors)
+                    y.extend(labels)
                     print(f"  Извлечено {len(features)} последовательностей")
 
-    # Загрузка неправильных приседаний
-    incorrect_dir = os.path.join(dataset_path, 'train', 'incorrect')
-    if os.path.exists(incorrect_dir):
-        for folder in sorted(os.listdir(incorrect_dir)):
-            folder_path = os.path.join(incorrect_dir, folder)
-            if not os.path.isdir(folder_path):
-                continue
-
-            video_file = os.path.join(folder_path, "video.mp4")
-            if os.path.exists(video_file):
-                # Определяем метки ошибок из файлов .txt
-                error_vector = [0] * N_ERROR_CLASSES
-                for idx, err_name in enumerate(ERROR_CLASSES):
-                    err_file = os.path.join(folder_path, f"{err_name}.txt")
-                    if os.path.exists(err_file):
-                        error_vector[idx] = 1
-
-                print(f"Обработка неправильного видео: {video_file} -> {error_vector}")
-                features, correctness, errors = process_video_file(video_file, 0, error_vector)
+    # Неправильные приседания
+    bad_squats_dir = os.path.join(dataset_path, 'bad_squats')
+    if os.path.exists(bad_squats_dir):
+        for video_file in os.listdir(bad_squats_dir):
+            if video_file.endswith(('.mp4', '.avi', '.mov')):
+                video_path = os.path.join(bad_squats_dir, video_file)
+                print(f"Обработка неправильного приседания: {video_path}")
+                features, labels = process_video_file(video_path, 0)  # метка 0 = неправильный
                 if len(features) > 0:
                     X.extend(features)
-                    y_correctness.extend(correctness)
-                    y_errors.extend(errors)
+                    y.extend(labels)
                     print(f"  Извлечено {len(features)} последовательностей")
 
-    return np.array(X), np.array(y_correctness), np.array(y_errors)
+    # Другие упражнения (считаем их неправильными для классификации приседаний)
+    other_exercises_dir = os.path.join(dataset_path, 'other_exercises')
+    if os.path.exists(other_exercises_dir):
+        for video_file in os.listdir(other_exercises_dir):
+            if video_file.endswith(('.mp4', '.avi', '.mov')):
+                video_path = os.path.join(other_exercises_dir, video_file)
+                print(f"Обработка другого упражнения: {video_path}")
+                features, labels = process_video_file(video_path, 0)  # метка 0 = не приседание
+                if len(features) > 0:
+                    X.extend(features)
+                    y.extend(labels)
+                    print(f"  Извлечено {len(features)} последовательностей")
+
+    return np.array(X), np.array(y)
 
 
-def build_multi_output_model(sequence_length, num_features):
-    """Создание модели с двумя выходами: correctness и errors"""
-    inputs = tf.keras.Input(shape=(sequence_length, num_features))
+def build_improved_model(sequence_length, num_features):
+    """Создание улучшенной LSTM модели (один выход — sigmoid)"""
+    model = Sequential([
+        # Первый слой Bidirectional LSTM
+        Bidirectional(LSTM(128, return_sequences=True, input_shape=(sequence_length, num_features))),
+        Dropout(0.3),
+        BatchNormalization(),
 
-    # Базовая структура LSTM
-    x = Bidirectional(LSTM(128, return_sequences=True))(inputs)
-    x = Dropout(0.3)(x)
-    x = BatchNormalization()(x)
+        # Второй слой Bidirectional LSTM
+        Bidirectional(LSTM(64, return_sequences=True)),
+        Dropout(0.3),
+        BatchNormalization(),
 
-    x = Bidirectional(LSTM(64, return_sequences=True))(x)
-    x = Dropout(0.3)(x)
-    x = BatchNormalization()(x)
+        # Третий слой Bidirectional LSTM
+        Bidirectional(LSTM(32)),
+        Dropout(0.3),
+        BatchNormalization(),
 
-    x = Bidirectional(LSTM(32))(x)
-    x = Dropout(0.3)(x)
-    x = BatchNormalization()(x)
-
-    # Выход 1: основной прогноз (правильность)
-    correctness = Dense(1, activation='sigmoid', name='correctness')(x)
-
-    # Выход 2: ошибки (многоклассовая классификация)
-    errors = Dense(N_ERROR_CLASSES, activation='sigmoid', name='errors')(x)  # sigmoid, т.к. могут быть несколько активных
-
-    model = Model(inputs=inputs, outputs=[correctness, errors])
+        # Полносвязные слои
+        Dense(64, activation='relu'),
+        Dropout(0.3),
+        Dense(32, activation='relu'),
+        Dropout(0.2),
+        Dense(1, activation='sigmoid')  # Один выход — вероятность правильности
+    ])
 
     model.compile(
         optimizer=Adam(learning_rate=0.001),
-        loss={
-            'correctness': 'binary_crossentropy',
-            'errors': 'binary_crossentropy'  # т.к. несколько меток могут быть активны
-        },
-        loss_weights={
-            'correctness': 1.0,
-            'errors': 0.5
-        },
-        metrics={
-            'correctness': 'accuracy',
-            'errors': 'accuracy'
-        }
+        loss='binary_crossentropy',
+        metrics=['accuracy']
     )
     return model
 
 
 def main():
+    # Путь к датасету
     dataset_path = os.path.join(os.path.dirname(__file__), 'dataset')
 
+    # Проверка наличия датасета
     if not os.path.exists(dataset_path):
         print("❌ Датасет не найден. Создайте структуру датасета в папке 'dataset'")
+        print("Структура:")
+        print("dataset/")
+        print("├── good_squats/     # Правильные приседания")
+        print("├── bad_squats/      # Неправильные приседания")
+        print("└── other_exercises/ # Другие упражнения")
         return
 
     print("Загрузка данных...")
-    X, y_correctness, y_errors = load_labeled_dataset(dataset_path)
 
-    if len(X) == 0:
-        print("❌ Нет данных для обучения.")
+    # Загрузка данных
+    X_train, y_train = load_unlabeled_dataset(dataset_path)
+
+    if len(X_train) == 0:
+        print("❌ Нет данных для обучения. Пожалуйста, добавьте видео в датасет.")
+        print("Убедитесь, что видео содержат приседания и имеют длительность не менее 30 кадров.")
         return
 
-    print(f"Данные загружены: {len(X)} обучающих примеров")
+    print(f"Данные загружены: {len(X_train)} обучающих примеров")
 
-    # Нормализация
-    X_flat = X.reshape(-1, X.shape[2])
-    mean = np.mean(X_flat, axis=0)
-    std = np.std(X_flat, axis=0)
-    std[std == 0] = 1
-    X = (X - mean) / std
+    # Нормализация данных
+    X_train_flat = X_train.reshape(-1, X_train.shape[2])
 
-    # Сохранение mean и std
+    mean = np.mean(X_train_flat, axis=0)
+    std = np.std(X_train_flat, axis=0)
+    std[std == 0] = 1  # Избегаем деления на ноль
+
+    X_train = (X_train - mean) / std
+
+    # Разделение на train/val
+    split_idx = int(len(X_train) * 0.8)
+    X_val = X_train[split_idx:]
+    y_val = y_train[split_idx:]
+    X_train = X_train[:split_idx]
+    y_train = y_train[:split_idx]
+
+    # Сохранение mean и std для использования в основном приложении
     np.save('features_mean.npy', mean)
     np.save('features_std.npy', std)
 
-    # Разделение на обучение и валидацию
-    split_idx = int(len(X) * 0.8)
-    X_val = X[split_idx:]
-    y_corr_val = y_correctness[split_idx:]
-    y_err_val = y_errors[split_idx:]
-    X = X[:split_idx]
-    y_correctness = y_correctness[:split_idx]
-    y_errors = y_errors[:split_idx]
-
     # Построение модели
-    sequence_length = X.shape[1]
-    num_features = X.shape[2]
-    model = build_multi_output_model(sequence_length, num_features)
+    sequence_length = X_train.shape[1]
+    num_features = X_train.shape[2]
+    model = build_improved_model(sequence_length, num_features)
 
     # Callbacks
-    early_stop = EarlyStopping(monitor='val_correctness_accuracy', patience=15, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor='val_correctness_loss', factor=0.5, patience=5, min_lr=1e-7)
+    early_stop = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7)
 
     # Обучение
     print("Обучение модели...")
     history = model.fit(
-        X, {'correctness': y_correctness, 'errors': y_errors},
-        validation_data=(X_val, {'correctness': y_corr_val, 'errors': y_err_val}),
+        X_train, y_train,
+        validation_data=(X_val, y_val),
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         callbacks=[early_stop, reduce_lr],
         verbose=1
     )
 
-    # Сохранение модели
-    model.save('squat_model_multi.h5')
-    print("✅ Модель сохранена в 'squat_model_multi.h5'")
-
-    # Сохранение информации о модели
-    model_info = {
-        'sequence_length': sequence_length,
-        'num_features': num_features,
-        'error_classes': ERROR_CLASSES
-    }
-    with open('model_info_multi.json', 'w') as f:
-        json.dump(model_info, f, indent=2)
-    print("✅ Информация о модели сохранена в 'model_info_multi.json'")
+    # Оценка
+    test_loss, test_acc = model.evaluate(X_val, y_val, verbose=0)
+    print(f"Точность на валидационных данных: {test_acc:.4f}")
 
     # График обучения
     try:
         plt.figure(figsize=(15, 5))
 
         plt.subplot(1, 3, 1)
-        plt.plot(history.history['correctness_accuracy'], label='Train Accuracy')
-        plt.plot(history.history['val_correctness_accuracy'], label='Val Accuracy')
-        plt.title('Correctness Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
+        plt.plot(history.history['accuracy'], label='Тренировочная точность')
+        plt.plot(history.history['val_accuracy'], label='Валидационная точность')
+        plt.title('Точность')
+        plt.xlabel('Эпоха')
+        plt.ylabel('Точность')
         plt.legend()
 
         plt.subplot(1, 3, 2)
-        plt.plot(history.history['errors_accuracy'], label='Train Errors Acc')
-        plt.plot(history.history['val_errors_accuracy'], label='Val Errors Acc')
-        plt.title('Errors Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-        plt.legend()
-
-        plt.subplot(1, 3, 3)
-        plt.plot(history.history['loss'], label='Total Loss')
-        plt.title('Total Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
+        plt.plot(history.history['loss'], label='Тренировочная потеря')
+        plt.plot(history.history['val_loss'], label='Валидационная потеря')
+        plt.title('Потеря')
+        plt.xlabel('Эпоха')
+        plt.ylabel('Потеря')
         plt.legend()
 
         plt.tight_layout()
-        plt.savefig('training_history_multi.png')
-        print("✅ График обучения сохранен в 'training_history_multi.png'")
+        plt.savefig('training_history.png')
+        print("✅ График обучения сохранен в 'training_history.png'")
+
     except Exception as e:
         print(f"❌ Не удалось сохранить график: {e}")
+
+    # Сохранение модели
+    try:
+        model.save('squat_model.h5')
+        print("✅ Модель сохранена в 'squat_model.h5'")
+    except Exception as e:
+        print(f"❌ Ошибка при сохранении модели: {e}")
+
+    # Информация о модели
+    model_info = {
+        'sequence_length': sequence_length,
+        'num_features': num_features,
+        'accuracy': float(test_acc),
+        'loss': float(test_loss)
+    }
+
+    with open('model_info.json', 'w') as f:
+        json.dump(model_info, f, indent=2)
+    print("✅ Информация о модели сохранена в 'model_info.json'")
 
 
 if __name__ == "__main__":
