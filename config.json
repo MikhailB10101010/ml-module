@@ -1,0 +1,9 @@
+{
+    "model_size": "large",
+    "resolution": [
+        1280,
+        720
+    ],
+    "fps": 20,
+    "use_gpu": true
+}
