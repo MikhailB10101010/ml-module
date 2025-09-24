@@ -327,6 +327,7 @@ def main():
     test_loss, test_acc = model.evaluate(X_val, y_val, verbose=0)
     print(f"Точность на валидационных данных: {test_acc:.4f}")
 
+
     # График обучения
     try:
         plt.figure(figsize=(15, 5))

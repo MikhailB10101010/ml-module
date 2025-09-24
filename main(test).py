@@ -11,6 +11,7 @@ from PIL import Image, ImageTk
 import threading
 
 
+
 class SquatAnalyzerApp:
     def __init__(self, root):
         self.root = root
