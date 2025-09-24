@@ -6,10 +6,9 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, BatchNo
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 import cv2
-from ultralytics import YOLO, solutions
+from ultralytics import YOLO
 import matplotlib.pyplot as plt
 import json
-import torch
 
 # Параметры обучения
 SEQUENCE_LENGTH = 30
@@ -104,12 +103,33 @@ def calculate_squat_features_v11(keypoints):
             if height_estimate > 0:
                 depth = depth / height_estimate
 
-        # Сбор всех признаков
+        # --- НОВЫЕ ПРИЗНАКИ СИММЕТРИИ ---
+
+        # 13. Разница в углах колен (симметрия)
+        knee_angle_diff = abs(right_knee - left_knee)
+
+        # 14. Разница в углах бедер (симметрия)
+        hip_angle_diff = abs(right_hip - left_hip)
+
+        # 15. Разница в отклонении колен от вертикали (симметрия)
+        knee_deviation_diff = abs(knee_deviation - knee_deviation_left)
+
+        # 16. Разница в высоте запястий (симметрия)
+        wrist_height_diff = abs(keypoints[9][1] - keypoints[10][1])
+
+        # 17. Разница в расстоянии от корпуса до запястий (симметрия)
+        wrist_to_body_dist_diff = abs(wrist_to_body_dist - np.linalg.norm(keypoints[10] - shoulder_center))
+
+        # 18. Средняя симметрия (вспомогательный признак)
+        avg_symmetry = (knee_angle_diff + hip_angle_diff + knee_deviation_diff + wrist_height_diff) / 4
+
+        # Сбор всех признаков (19 штук)
         features = [
             right_knee, left_knee, right_hip, left_hip,
             dist_knees, dist_feet, depth, knee_deviation,
             wrist_distance, wrist_shoulder_diff, wrist_to_body_dist, arm_body_angle,
-            knee_deviation_left  # дополнительный признак
+            knee_deviation_left,
+            knee_angle_diff, hip_angle_diff, knee_deviation_diff, wrist_height_diff, wrist_to_body_dist_diff, avg_symmetry
         ]
 
         return features
@@ -134,7 +154,6 @@ def process_video_file(video_file, label):
         if not ret:
             break
 
-        # Обрабатываем каждый кадр для точного воспроизведения
         results = model(frame, verbose=False)
         keypoints = results[0].keypoints.xy.cpu().numpy()
 
@@ -160,13 +179,7 @@ def process_video_file(video_file, label):
 def load_unlabeled_dataset(dataset_path):
     """Загрузка не размеченных данных для обучения"""
     X = []
-    y = []  # Метки будут определяться автоматически
-
-    # Для не размеченных данных мы создаем структуру:
-    # dataset/
-    #   ├── good_squats/     # Правильные приседания (метка 1)
-    #   ├── bad_squats/      # Неправильные приседания (метка 0)
-    #   └── other_exercises/ # Другие упражнения (метка 0)
+    y = []
 
     # Правильные приседания
     good_squats_dir = os.path.join(dataset_path, 'good_squats')
@@ -210,61 +223,8 @@ def load_unlabeled_dataset(dataset_path):
     return np.array(X), np.array(y)
 
 
-def load_labeled_dataset(dataset_path):
-    """Загрузка размеченных данных (ваша старая структура)"""
-    X = []
-    y = []
-    error_labels = []
-
-    # Загрузка правильных приседаний
-    correct_dir = os.path.join(dataset_path, 'train', 'correct')
-    if os.path.exists(correct_dir):
-        for folder in sorted(os.listdir(correct_dir)):
-            folder_path = os.path.join(correct_dir, folder)
-            if not os.path.isdir(folder_path):
-                continue
-
-            video_file = os.path.join(folder_path, "video.mp4")
-            if os.path.exists(video_file):
-                print(f"Обработка правильного видео: {video_file}")
-                features, labels = process_video_file(video_file, 1)
-                if len(features) > 0:
-                    X.extend(features)
-                    y.extend(labels)
-                    error_labels.extend([''] * len(features))
-                    print(f"  Извлечено {len(features)} последовательностей")
-
-    # Загрузка неправильных приседаний
-    incorrect_dir = os.path.join(dataset_path, 'train', 'incorrect')
-    if os.path.exists(incorrect_dir):
-        for folder in sorted(os.listdir(incorrect_dir)):
-            folder_path = os.path.join(incorrect_dir, folder)
-            if not os.path.isdir(folder_path):
-                continue
-
-            video_file = os.path.join(folder_path, "video.mp4")
-            if os.path.exists(video_file):
-                print(f"Обработка неправильного видео: {video_file}")
-                features, labels = process_video_file(video_file, 0)
-                if len(features) > 0:
-                    X.extend(features)
-                    y.extend(labels)
-
-                    # Получаем метки ошибок
-                    error_file = os.path.join(folder_path, "errors.txt")
-                    if os.path.exists(error_file):
-                        with open(error_file, 'r', encoding='utf-8') as f:
-                            errors = f.read().strip()
-                        error_labels.extend([errors] * len(features))
-                    else:
-                        error_labels.extend([''] * len(features))
-                    print(f"  Извлечено {len(features)} последовательностей")
-
-    return np.array(X), np.array(y), error_labels
-
-
 def build_improved_model(sequence_length, num_features):
-    """Создание улучшенной LSTM модели"""
+    """Создание улучшенной LSTM модели (один выход — sigmoid)"""
     model = Sequential([
         # Первый слой Bidirectional LSTM
         Bidirectional(LSTM(128, return_sequences=True, input_shape=(sequence_length, num_features))),
@@ -286,7 +246,7 @@ def build_improved_model(sequence_length, num_features):
         Dropout(0.3),
         Dense(32, activation='relu'),
         Dropout(0.2),
-        Dense(1, activation='sigmoid')
+        Dense(1, activation='sigmoid')  # Один выход — вероятность правильности
     ])
 
     model.compile(
@@ -304,35 +264,17 @@ def main():
     # Проверка наличия датасета
     if not os.path.exists(dataset_path):
         print("❌ Датасет не найден. Создайте структуру датасета в папке 'dataset'")
-        print("Вариант 1 (не размеченные):")
+        print("Структура:")
         print("dataset/")
-        print("├── good_squats/")  # Правильные приседания
-        print("├── bad_squats/")  # Неправильные приседания
-        print("└── other_exercises/")  # Другие упражнения")
-        print("\nВариант 2 (размеченные):")
-        print("dataset/")
-        print("├── train/")
-        print("│   ├── correct/")
-        print("│   └── incorrect/")
-        print("└── val/")
-        print("    ├── correct/")
-        print("    └── incorrect/")
+        print("├── good_squats/     # Правильные приседания")
+        print("├── bad_squats/      # Неправильные приседания")
+        print("└── other_exercises/ # Другие упражнения")
         return
 
     print("Загрузка данных...")
 
-    # Проверяем, какая структура датасета используется
-    if os.path.exists(os.path.join(dataset_path, 'good_squats')) or \
-            os.path.exists(os.path.join(dataset_path, 'bad_squats')):
-        # Не размеченные данные
-        X_train, y_train = load_unlabeled_dataset(dataset_path)
-        X_val, y_val = np.array([]), np.array([])  # Для простоты валидации нет
-        print("Используется структура не размеченных данных")
-    else:
-        # Размеченные данные
-        X_train, y_train, _ = load_labeled_dataset(dataset_path)
-        X_val, y_val = np.array([]), np.array([])  # Для простоты валидации нет
-        print("Используется структура размеченных данных")
+    # Загрузка данных
+    X_train, y_train = load_unlabeled_dataset(dataset_path)
 
     if len(X_train) == 0:
         print("❌ Нет данных для обучения. Пожалуйста, добавьте видео в датасет.")
@@ -350,14 +292,12 @@ def main():
 
     X_train = (X_train - mean) / std
 
-    # Если нет валидационных данных, используем часть обучающих
-    if len(X_val) == 0:
-        # Разделяем данные на обучение и валидацию
-        split_idx = int(len(X_train) * 0.8)
-        X_val = X_train[split_idx:]
-        y_val = y_train[split_idx:]
-        X_train = X_train[:split_idx]
-        y_train = y_train[:split_idx]
+    # Разделение на train/val
+    split_idx = int(len(X_train) * 0.8)
+    X_val = X_train[split_idx:]
+    y_val = y_train[split_idx:]
+    X_train = X_train[:split_idx]
+    y_train = y_train[:split_idx]
 
     # Сохранение mean и std для использования в основном приложении
     np.save('features_mean.npy', mean)
@@ -368,11 +308,11 @@ def main():
     num_features = X_train.shape[2]
     model = build_improved_model(sequence_length, num_features)
 
-    # Callbacks для улучшения обучения
+    # Callbacks
     early_stop = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7)
 
-    # Обучение модели
+    # Обучение
     print("Обучение модели...")
     history = model.fit(
         X_train, y_train,
@@ -383,15 +323,15 @@ def main():
         verbose=1
     )
 
-    # Оценка модели
+    # Оценка
     test_loss, test_acc = model.evaluate(X_val, y_val, verbose=0)
     print(f"Точность на валидационных данных: {test_acc:.4f}")
 
-    # Вывод графика обучения
+
+    # График обучения
     try:
         plt.figure(figsize=(15, 5))
 
-        # График точности
         plt.subplot(1, 3, 1)
         plt.plot(history.history['accuracy'], label='Тренировочная точность')
         plt.plot(history.history['val_accuracy'], label='Валидационная точность')
@@ -400,7 +340,6 @@ def main():
         plt.ylabel('Точность')
         plt.legend()
 
-        # График потерь
         plt.subplot(1, 3, 2)
         plt.plot(history.history['loss'], label='Тренировочная потеря')
         plt.plot(history.history['val_loss'], label='Валидационная потеря')
@@ -409,7 +348,6 @@ def main():
         plt.ylabel('Потеря')
         plt.legend()
 
-        # Сохранение графика
         plt.tight_layout()
         plt.savefig('training_history.png')
         print("✅ График обучения сохранен в 'training_history.png'")
@@ -417,13 +355,14 @@ def main():
     except Exception as e:
         print(f"❌ Не удалось сохранить график: {e}")
 
+    # Сохранение модели
     try:
         model.save('squat_model.h5')
         print("✅ Модель сохранена в 'squat_model.h5'")
     except Exception as e:
         print(f"❌ Ошибка при сохранении модели: {e}")
 
-    # Сохраняем информацию о модели
+    # Информация о модели
     model_info = {
         'sequence_length': sequence_length,
         'num_features': num_features,
