@@ -1,3 +1,4 @@
+
 import cv2
 import torch
 import time
@@ -92,7 +93,7 @@ class HardwareTester:
 def recommend_configuration(test_results):
     """Рекомендация конфигурации на основе результатов теста"""
     config = {
-        'model_size': 'nano',  # nano, medium, large
+        'model_size': 's',  # small or large
         'resolution': (640, 480),
         'fps': 20,
         'use_gpu': False
@@ -102,22 +103,22 @@ def recommend_configuration(test_results):
     if test_results['gpu_available']:
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         if gpu_memory >= 8 and test_results['ram_gb'] >= 16:
-            config['model_size'] = 'large'
+            config['model_size'] = 'l'
         elif gpu_memory >= 4 and test_results['ram_gb'] >= 8:
-            config['model_size'] = 'medium'
+            config['model_size'] = 's'
         else:
-            config['model_size'] = 'nano'
+            config['model_size'] = 's'
         config['use_gpu'] = True
     else:
-        # На CPU используем только nano модель
-        config['model_size'] = 'nano'
+        # На CPU используем только small модель
+        config['model_size'] = 's'
         config['use_gpu'] = False
 
     # Определяем разрешение
     cam_width, cam_height = test_results['camera_resolution']
-    if config['model_size'] == 'large' and cam_width >= 1280:
+    if config['model_size'] == 'l' and cam_width >= 1280:
         config['resolution'] = (1280, 720)
-    elif config['model_size'] == 'medium' and cam_width >= 1024:
+    elif config['model_size'] == 's' and cam_width >= 1024:
         config['resolution'] = (1024, 768)
     else:
         config['resolution'] = (640, 480)
@@ -190,7 +191,7 @@ RAM: {self.test_results['ram_gb']} ГБ
         ttk.Label(model_frame, text="Размер модели:").pack(side=tk.LEFT)
         self.model_var = tk.StringVar(value=self.recommended_config['model_size'])
         model_combo = ttk.Combobox(model_frame, textvariable=self.model_var,
-                                   values=['nano', 'medium', 'large'], state='readonly')
+                                   values=['s', 'l'], state='readonly')
         model_combo.pack(side=tk.RIGHT)
         model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
 
@@ -239,14 +240,11 @@ RAM: {self.test_results['ram_gb']} ГБ
     def on_model_change(self, event=None):
         """Обработчик изменения размера модели"""
         model_size = self.model_var.get()
-        if model_size == 'large' and self.test_results['gpu_available']:
+        if model_size == 'l' and self.test_results['gpu_available']:
             # Для large модели рекомендуем более высокое разрешение
             self.res_var.set('1280x720')
             self.fps_var.set(min(20, self.test_results['max_fps']))
-        elif model_size == 'medium':
-            self.res_var.set('1024x768')
-            self.fps_var.set(min(25, self.test_results['max_fps']))
-        else:
+        elif model_size == 's':
             self.res_var.set('640x480')
             self.fps_var.set(min(30, self.test_results['max_fps']))
 
